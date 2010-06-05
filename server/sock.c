@@ -119,7 +119,7 @@ static void sock_destroy( struct object *obj );
 static int sock_get_poll_events( struct fd *fd );
 static void sock_poll_event( struct fd *fd, int event );
 static enum server_fd_type sock_get_fd_type( struct fd *fd );
-static void sock_queue_async( struct fd *fd, const async_data_t *data, int type, int count );
+static void sock_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
 static void sock_reselect_async( struct fd *fd, struct async_queue *queue );
 static void sock_cancel_async( struct fd *fd, struct process *process, struct thread *thread, client_ptr_t iosb );
 
@@ -510,20 +510,20 @@ static enum server_fd_type sock_get_fd_type( struct fd *fd )
     return FD_TYPE_SOCKET;
 }
 
-static void sock_queue_async( struct fd *fd, const async_data_t *data, int type, int count )
+static void sock_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
 {
     struct sock *sock = get_fd_user( fd );
     struct async_queue *queue;
 
     assert( sock->obj.ops == &sock_ops );
 
-    switch (type)
+    switch (pollev)
     {
-    case ASYNC_TYPE_READ:
+    case POLLIN:
         if (!sock->read_q && !(sock->read_q = create_async_queue( sock->fd ))) return;
         queue = sock->read_q;
         break;
-    case ASYNC_TYPE_WRITE:
+    case POLLOUT:
         if (!sock->write_q && !(sock->write_q = create_async_queue( sock->fd ))) return;
         queue = sock->write_q;
         break;
@@ -532,8 +532,8 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int type,
         return;
     }
 
-    if ( ( !( sock->state & FD_READ ) && type == ASYNC_TYPE_READ  ) ||
-         ( !( sock->state & FD_WRITE ) && type == ASYNC_TYPE_WRITE ) )
+    if ( ( !( sock->state & FD_READ ) && pollev == POLLIN  ) ||
+         ( !( sock->state & FD_WRITE ) && pollev == POLLOUT ) )
     {
         set_error( STATUS_PIPE_DISCONNECTED );
     }

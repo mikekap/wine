@@ -2000,35 +2000,31 @@ void default_poll_event( struct fd *fd, int event )
     else if (!fd->inode) set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
 }
 
-struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int type )
+struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int pollev )
 {
     struct async_queue *queue;
     struct async *async;
-    int pollev = 0;
 
-    switch (type)
+    switch (pollev)
     {
-    case ASYNC_TYPE_READ:
+    case POLLIN:
         if (!fd->read_q && !(fd->read_q = create_async_queue( fd ))) return NULL;
         queue = fd->read_q;
-        pollev = POLLIN;
         break;
-    case ASYNC_TYPE_WRITE:
+    case POLLOUT:
         if (!fd->write_q && !(fd->write_q = create_async_queue( fd ))) return NULL;
         queue = fd->write_q;
-        pollev = POLLOUT;
         break;
-    case ASYNC_TYPE_WAIT:
+    case 0:
         if (!fd->wait_q && !(fd->wait_q = create_async_queue( fd ))) return NULL;
         queue = fd->wait_q;
-        pollev = 0;
         break;
     default:
         queue = NULL;
         assert(0);
     }
 
-    if ((async = create_async( current, queue, pollev, data )) && type != ASYNC_TYPE_WAIT)
+    if ((async = create_async( current, queue, pollev, data )) && pollev)
     {
         if (!fd->inode)
             set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
@@ -2038,17 +2034,17 @@ struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int type 
     return async;
 }
 
-void fd_async_wake_up( struct fd *fd, int type, unsigned int status )
+void fd_async_wake_up( struct fd *fd, int pollev, unsigned int status )
 {
-    switch (type)
+    switch (pollev)
     {
-    case ASYNC_TYPE_READ:
-        async_wake_up( fd->read_q, POLLIN, status );
+    case POLLIN:
+        async_wake_up( fd->read_q, pollev, status );
         break;
-    case ASYNC_TYPE_WRITE:
-        async_wake_up( fd->write_q, POLLOUT, status );
+    case POLLOUT:
+        async_wake_up( fd->write_q, pollev, status );
         break;
-    case ASYNC_TYPE_WAIT:
+    case 0:
         async_wake_up( fd->wait_q, 0, status );
         break;
     default:
@@ -2061,16 +2057,16 @@ void fd_reselect_async( struct fd *fd, struct async_queue *queue )
     fd->fd_ops->reselect_async( fd, queue );
 }
 
-void no_fd_queue_async( struct fd *fd, const async_data_t *data, int type, int count )
+void no_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
 {
     set_error( STATUS_OBJECT_TYPE_MISMATCH );
 }
 
-void default_fd_queue_async( struct fd *fd, const async_data_t *data, int type, int count )
+void default_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
 {
     struct async *async;
 
-    if ((async = fd_queue_async( fd, data, type )))
+    if ((async = fd_queue_async( fd, data, pollev )))
     {
         release_object( async );
         set_error( STATUS_PENDING );
@@ -2301,15 +2297,18 @@ DECL_HANDLER(ioctl)
 DECL_HANDLER(register_async)
 {
     unsigned int access;
+    int events;
     struct fd *fd;
 
     switch(req->type)
     {
     case ASYNC_TYPE_READ:
         access = FILE_READ_DATA;
+        events = POLLIN;
         break;
     case ASYNC_TYPE_WRITE:
         access = FILE_WRITE_DATA;
+        events = POLLOUT;
         break;
     default:
         set_error( STATUS_INVALID_PARAMETER );
@@ -2318,7 +2317,7 @@ DECL_HANDLER(register_async)
 
     if ((fd = get_handle_fd_obj( current->process, req->async.handle, access )))
     {
-        if (get_unix_fd( fd ) != -1) fd->fd_ops->queue_async( fd, &req->async, req->type, req->count );
+        if (get_unix_fd( fd ) != -1) fd->fd_ops->queue_async( fd, &req->async, events, req->count );
         release_object( fd );
     }
 }

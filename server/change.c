@@ -290,7 +290,7 @@ void sigio_callback(void)
     LIST_FOR_EACH_ENTRY( dir, &change_list, struct dir, entry )
     {
         if (interlocked_xchg( &dir->notified, 0 ))
-            fd_async_wake_up( dir->fd, ASYNC_TYPE_WAIT, STATUS_NOTIFY_ENUM_DIR );
+            fd_async_wake_up( dir->fd, 0, STATUS_NOTIFY_ENUM_DIR );
     }
 }
 
@@ -646,7 +646,7 @@ static void inotify_do_change_notify( struct dir *dir, unsigned int action,
         list_add_tail( &dir->change_records, &record->entry );
     }
 
-    fd_async_wake_up( dir->fd, ASYNC_TYPE_WAIT, STATUS_ALERTED );
+    fd_async_wake_up( dir->fd, 0, STATUS_ALERTED );
 }
 
 static unsigned int filter_from_event( struct inotify_event *ie )
@@ -1144,7 +1144,7 @@ DECL_HANDLER(read_directory_changes)
         return;
 
     /* requests don't timeout */
-    if (!(async = fd_queue_async( dir->fd, &req->async, ASYNC_TYPE_WAIT ))) goto end;
+    if (!(async = fd_queue_async( dir->fd, &req->async, 0 ))) goto end;
 
     /* assign it once */
     if (!dir->filter)
@@ -1158,7 +1158,7 @@ DECL_HANDLER(read_directory_changes)
 
     /* if there's already a change in the queue, send it */
     if (!list_empty( &dir->change_records ))
-        fd_async_wake_up( dir->fd, ASYNC_TYPE_WAIT, STATUS_ALERTED );
+        fd_async_wake_up( dir->fd, 0, STATUS_ALERTED );
 
     /* setup the real notification */
     if (!inotify_adjust_changes( dir ))

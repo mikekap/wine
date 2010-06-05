@@ -42,7 +42,7 @@ struct fd_ops
     obj_handle_t (*ioctl)(struct fd *fd, ioctl_code_t code, const async_data_t *async, int blocking,
                           const void *data, data_size_t size);
     /* queue an async operation */
-    void (*queue_async)(struct fd *, const async_data_t *data, int type, int count);
+    void (*queue_async)(struct fd *, const async_data_t *data, int pollev, int count);
     /* selected events for async i/o need an update */
     void (*reselect_async)( struct fd *, struct async_queue *queue );
     /* cancel an async operation */
@@ -78,15 +78,15 @@ extern int default_fd_signaled( struct object *obj, struct thread *thread );
 extern unsigned int default_fd_map_access( struct object *obj, unsigned int access );
 extern int default_fd_get_poll_events( struct fd *fd );
 extern void default_poll_event( struct fd *fd, int event );
-extern struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int type );
-extern void fd_async_wake_up( struct fd *fd, int type, unsigned int status );
+extern struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int pollev );
+extern void fd_async_wake_up( struct fd *fd, int pollev, unsigned int status );
 extern void fd_reselect_async( struct fd *fd, struct async_queue *queue );
 extern obj_handle_t no_fd_ioctl( struct fd *fd, ioctl_code_t code, const async_data_t *async,
                                  int blocking, const void *data, data_size_t size );
 extern obj_handle_t default_fd_ioctl( struct fd *fd, ioctl_code_t code, const async_data_t *async,
                                       int blocking, const void *data, data_size_t size );
-extern void no_fd_queue_async( struct fd *fd, const async_data_t *data, int type, int count );
-extern void default_fd_queue_async( struct fd *fd, const async_data_t *data, int type, int count );
+extern void no_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
+extern void default_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
 extern void default_fd_reselect_async( struct fd *fd, struct async_queue *queue );
 extern void default_fd_cancel_async( struct fd *fd, struct process *process, struct thread *thread, client_ptr_t iosb );
 extern void no_flush( struct fd *fd, struct event **event );

@@ -62,7 +62,7 @@ static void serial_destroy(struct object *obj);
 
 static enum server_fd_type serial_get_fd_type( struct fd *fd );
 static void serial_flush( struct fd *fd, struct event **event );
-static void serial_queue_async( struct fd *fd, const async_data_t *data, int type, int count );
+static void serial_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
 
 struct serial
 {
@@ -170,7 +170,7 @@ static enum server_fd_type serial_get_fd_type( struct fd *fd )
     return FD_TYPE_SERIAL;
 }
 
-static void serial_queue_async( struct fd *fd, const async_data_t *data, int type, int count )
+static void serial_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
 {
     struct serial *serial = get_fd_user( fd );
     timeout_t timeout = 0;
@@ -178,17 +178,17 @@ static void serial_queue_async( struct fd *fd, const async_data_t *data, int typ
 
     assert(serial->obj.ops == &serial_ops);
 
-    switch (type)
+    switch (pollev)
     {
-    case ASYNC_TYPE_READ:
+    case POLLIN:
         timeout = serial->readconst + (timeout_t)serial->readmult*count;
         break;
-    case ASYNC_TYPE_WRITE:
+    case POLLOUT:
         timeout = serial->writeconst + (timeout_t)serial->writemult*count;
         break;
     }
 
-    if ((async = fd_queue_async( fd, data, type )))
+    if ((async = fd_queue_async( fd, data, pollev )))
     {
         if (timeout) async_set_timeout( async, timeout * -10000, STATUS_TIMEOUT );
         release_object( async );
@@ -246,7 +246,7 @@ DECL_HANDLER(set_serial_info)
             serial->eventmask = req->eventmask;
             if (!serial->eventmask)
             {
-                fd_async_wake_up( serial->fd, ASYNC_TYPE_WAIT, STATUS_SUCCESS );
+                fd_async_wake_up( serial->fd, 0, STATUS_SUCCESS );
             }
         }
 
