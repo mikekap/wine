@@ -38,6 +38,7 @@ struct async
     struct thread       *thread;          /* owning thread */
     struct list          queue_entry;     /* entry in async queue list */
     struct async_queue  *queue;           /* queue containing this async */
+    int                  pollev;          /* poll events this async waiting for */
     unsigned int         status;          /* current status */
     struct timeout_user *timeout;
     unsigned int         timeout_status;  /* status to report upon timeout */
@@ -188,12 +189,12 @@ void free_async_queue( struct async_queue *queue )
 {
     if (!queue) return;
     queue->fd = NULL;
-    async_wake_up( queue, STATUS_HANDLES_CLOSED );
+    async_wake_up( queue, 0, STATUS_HANDLES_CLOSED );
     release_object( queue );
 }
 
 /* create an async on a given queue of a fd */
-struct async *create_async( struct thread *thread, struct async_queue *queue, const async_data_t *data )
+struct async *create_async( struct thread *thread, struct async_queue *queue, int pollev, const async_data_t *data )
 {
     struct event *event = NULL;
     struct async *async;
@@ -213,6 +214,7 @@ struct async *create_async( struct thread *thread, struct async_queue *queue, co
     async->data    = *data;
     async->timeout = NULL;
     async->queue   = (struct async_queue *)grab_object( queue );
+    async->pollev  = pollev;
     async->completion = NULL;
     if (queue->fd) async->completion = fd_get_completion( queue->fd, &async->comp_key );
 
@@ -317,7 +319,7 @@ int async_wake_up_by( struct async_queue *queue, struct process *process,
 }
 
 /* wake up async operations on the queue */
-void async_wake_up( struct async_queue *queue, unsigned int status )
+void async_wake_up( struct async_queue *queue, int events, unsigned int status )
 {
     struct list *ptr, *next;
 
@@ -326,7 +328,19 @@ void async_wake_up( struct async_queue *queue, unsigned int status )
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
         struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
-        async_terminate( async, status );
-        if (status == STATUS_ALERTED) break;  /* only wake up the first one */
+        if (status == STATUS_ALERTED)
+        {
+            /* events == 0 is valid, and we only wake async->events == 0 */
+            if ( events == async->pollev || events & async->pollev )
+            {
+                events &= ~async->pollev;
+                async_terminate( async, status );
+            }
+
+            if (!events)
+                break;  /* only wake up the first one, for each event type */
+        }
+        else
+            async_terminate( async, status );
     }
 }

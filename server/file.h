@@ -141,17 +141,18 @@ extern struct object *create_serial( struct fd *fd );
 /* async I/O functions */
 extern struct async_queue *create_async_queue( struct fd *fd );
 extern void free_async_queue( struct async_queue *queue );
-extern struct async *create_async( struct thread *thread, struct async_queue *queue,
+extern struct async *create_async( struct thread *thread, struct async_queue *queue, int pollev,
                                    const async_data_t *data );
 extern void async_set_timeout( struct async *async, timeout_t timeout, unsigned int status );
 extern void async_set_result( struct object *obj, unsigned int status,
                               unsigned int total, client_ptr_t apc );
+extern int async_get_poll_events( struct async_queue *queue );
 extern int async_queued( struct async_queue *queue );
 extern int async_waiting( struct async_queue *queue );
 extern void async_terminate( struct async *async, unsigned int status );
 extern int async_wake_up_by( struct async_queue *queue, struct process *process,
                              struct thread *thread, client_ptr_t iosb, unsigned int status );
-extern void async_wake_up( struct async_queue *queue, unsigned int status );
+extern void async_wake_up( struct async_queue *queue, int pollev, unsigned int status );
 extern struct completion *fd_get_completion( struct fd *fd, apc_param_t *p_key );
 extern void fd_copy_completion( struct fd *src, struct fd *dst );
 

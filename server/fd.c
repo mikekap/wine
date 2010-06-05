@@ -1514,8 +1514,8 @@ static inline void unmount_fd( struct fd *fd )
 {
     assert( fd->inode );
 
-    async_wake_up( fd->read_q, STATUS_VOLUME_DISMOUNTED );
-    async_wake_up( fd->write_q, STATUS_VOLUME_DISMOUNTED );
+    async_wake_up( fd->read_q, 0, STATUS_VOLUME_DISMOUNTED );
+    async_wake_up( fd->write_q, 0, STATUS_VOLUME_DISMOUNTED );
 
     if (fd->poll_index != -1) set_fd_events( fd, -1 );
 
@@ -1992,8 +1992,8 @@ int default_fd_get_poll_events( struct fd *fd )
 /* default handler for poll() events */
 void default_poll_event( struct fd *fd, int event )
 {
-    if (event & (POLLIN | POLLERR | POLLHUP)) async_wake_up( fd->read_q, STATUS_ALERTED );
-    if (event & (POLLOUT | POLLERR | POLLHUP)) async_wake_up( fd->write_q, STATUS_ALERTED );
+    if (event & (POLLIN | POLLERR | POLLHUP)) async_wake_up( fd->read_q, POLLIN, STATUS_ALERTED );
+    if (event & (POLLOUT | POLLERR | POLLHUP)) async_wake_up( fd->write_q, POLLOUT, STATUS_ALERTED );
 
     /* if an error occurred, stop polling this fd to avoid busy-looping */
     if (event & (POLLERR | POLLHUP)) set_fd_events( fd, -1 );
@@ -2004,32 +2004,36 @@ struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int type 
 {
     struct async_queue *queue;
     struct async *async;
+    int pollev = 0;
 
     switch (type)
     {
     case ASYNC_TYPE_READ:
         if (!fd->read_q && !(fd->read_q = create_async_queue( fd ))) return NULL;
         queue = fd->read_q;
+        pollev = POLLIN;
         break;
     case ASYNC_TYPE_WRITE:
         if (!fd->write_q && !(fd->write_q = create_async_queue( fd ))) return NULL;
         queue = fd->write_q;
+        pollev = POLLOUT;
         break;
     case ASYNC_TYPE_WAIT:
         if (!fd->wait_q && !(fd->wait_q = create_async_queue( fd ))) return NULL;
         queue = fd->wait_q;
+        pollev = 0;
         break;
     default:
         queue = NULL;
         assert(0);
     }
 
-    if ((async = create_async( current, queue, data )) && type != ASYNC_TYPE_WAIT)
+    if ((async = create_async( current, queue, pollev, data )) && type != ASYNC_TYPE_WAIT)
     {
         if (!fd->inode)
             set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
         else  /* regular files are always ready for read and write */
-            async_wake_up( queue, STATUS_ALERTED );
+            async_wake_up( queue, pollev, STATUS_ALERTED );
     }
     return async;
 }
@@ -2039,13 +2043,13 @@ void fd_async_wake_up( struct fd *fd, int type, unsigned int status )
     switch (type)
     {
     case ASYNC_TYPE_READ:
-        async_wake_up( fd->read_q, status );
+        async_wake_up( fd->read_q, POLLIN, status );
         break;
     case ASYNC_TYPE_WRITE:
-        async_wake_up( fd->write_q, status );
+        async_wake_up( fd->write_q, POLLOUT, status );
         break;
     case ASYNC_TYPE_WAIT:
-        async_wake_up( fd->wait_q, status );
+        async_wake_up( fd->wait_q, 0, status );
         break;
     default:
         assert(0);

@@ -302,12 +302,12 @@ static void sock_dispatch_asyncs( struct sock *sock, int event )
         if ( event & (POLLIN|POLLPRI|POLLERR|POLLHUP) && async_waiting( sock->read_q ))
         {
             if (debug_level) fprintf( stderr, "activating read queue for socket %p\n", sock );
-            async_wake_up( sock->read_q, STATUS_ALERTED );
+            async_wake_up( sock->read_q, POLLIN, STATUS_ALERTED );
         }
         if ( event & (POLLOUT|POLLERR|POLLHUP) && async_waiting( sock->write_q ))
         {
             if (debug_level) fprintf( stderr, "activating write queue for socket %p\n", sock );
-            async_wake_up( sock->write_q, STATUS_ALERTED );
+            async_wake_up( sock->write_q, POLLOUT, STATUS_ALERTED );
         }
     }
 }
@@ -540,7 +540,7 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int type,
     else
     {
         struct async *async;
-        if (!(async = create_async( current, queue, data ))) return;
+        if (!(async = create_async( current, queue, pollev, data ))) return;
         release_object( async );
         set_error( STATUS_PENDING );
     }

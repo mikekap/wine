@@ -629,7 +629,7 @@ static obj_handle_t pipe_server_ioctl( struct fd *fd, ioctl_code_t code, const a
             if (async)
             {
                 set_server_state( server, ps_wait_open );
-                if (server->pipe->waiters) async_wake_up( server->pipe->waiters, STATUS_SUCCESS );
+                if (server->pipe->waiters) async_wake_up( server->pipe->waiters, 0, STATUS_SUCCESS );
                 release_object( async );
                 set_error( STATUS_PENDING );
                 return wait_handle;
@@ -901,13 +901,13 @@ static obj_handle_t named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, c
                     async_data_t new_data = *async_data;
                     if (!(wait_handle = alloc_wait_event( current->process ))) goto done;
                     new_data.event = wait_handle;
-                    if (!(async = create_async( current, pipe->waiters, &new_data )))
+                    if (!(async = create_async( current, pipe->waiters, 0, &new_data )))
                     {
                         close_handle( current->process, wait_handle );
                         wait_handle = 0;
                     }
                 }
-                else async = create_async( current, pipe->waiters, async_data );
+                else async = create_async( current, pipe->waiters, 0, async_data );
 
                 if (async)
                 {
