@@ -280,6 +280,25 @@ void async_set_result( struct object *obj, unsigned int status, unsigned int tot
     }
 }
 
+int async_get_poll_events( struct async_queue *queue )
+{
+    struct list *ptr, *next;
+    int ev = 0;
+    int blocked = 0;
+
+    if (!queue) return 0;
+
+    LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
+    {
+        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+        if (async->status == STATUS_PENDING)
+            ev |= async->pollev;
+        else
+            blocked |= async->pollev;
+    }
+    return ev & ~blocked;
+}
+
 /* check if there are any queued async operations */
 int async_queued( struct async_queue *queue )
 {

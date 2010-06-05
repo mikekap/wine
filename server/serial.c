@@ -186,6 +186,9 @@ static void serial_queue_async( struct fd *fd, const async_data_t *data, int pol
     case POLLOUT:
         timeout = serial->writeconst + (timeout_t)serial->writemult*count;
         break;
+    default:
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
     }
 
     if ((async = fd_queue_async( fd, data, pollev )))

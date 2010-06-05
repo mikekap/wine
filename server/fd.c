@@ -200,9 +200,7 @@ struct fd
     unsigned int         signaled :1; /* is the fd signaled? */
     unsigned int         fs_locks :1; /* can we use filesystem locks for this fd? */
     int                  poll_index;  /* index of fd in poll array */
-    struct async_queue  *read_q;      /* async readers of this fd */
-    struct async_queue  *write_q;     /* async writers of this fd */
-    struct async_queue  *wait_q;      /* other async waiters of this fd */
+    struct async_queue  *waiters;     /* things waiting on this fd */
     struct completion   *completion;  /* completion object attached to this fd */
     apc_param_t          comp_key;    /* completion key to set in completion events */
 };
@@ -1468,9 +1466,7 @@ static void fd_destroy( struct object *obj )
 {
     struct fd *fd = (struct fd *)obj;
 
-    free_async_queue( fd->read_q );
-    free_async_queue( fd->write_q );
-    free_async_queue( fd->wait_q );
+    free_async_queue( fd->waiters );
 
     if (fd->completion) release_object( fd->completion );
     remove_fd_locks( fd );
@@ -1514,8 +1510,7 @@ static inline void unmount_fd( struct fd *fd )
 {
     assert( fd->inode );
 
-    async_wake_up( fd->read_q, 0, STATUS_VOLUME_DISMOUNTED );
-    async_wake_up( fd->write_q, 0, STATUS_VOLUME_DISMOUNTED );
+    async_wake_up( fd->waiters, 0, STATUS_VOLUME_DISMOUNTED );
 
     if (fd->poll_index != -1) set_fd_events( fd, -1 );
 
@@ -1549,9 +1544,7 @@ static struct fd *alloc_fd_object(void)
     fd->signaled   = 1;
     fd->fs_locks   = 1;
     fd->poll_index = -1;
-    fd->read_q     = NULL;
-    fd->write_q    = NULL;
-    fd->wait_q     = NULL;
+    fd->waiters    = NULL;
     fd->completion = NULL;
     list_init( &fd->inode_entry );
     list_init( &fd->locks );
@@ -1583,9 +1576,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     fd->signaled   = 0;
     fd->fs_locks   = 0;
     fd->poll_index = -1;
-    fd->read_q     = NULL;
-    fd->write_q    = NULL;
-    fd->wait_q     = NULL;
+    fd->waiters    = NULL;
     fd->completion = NULL;
     fd->no_fd_status = STATUS_BAD_DEVICE_TYPE;
     list_init( &fd->inode_entry );
@@ -1611,9 +1602,7 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
     fd->signaled   = 0;
     fd->fs_locks   = 0;
     fd->poll_index = -1;
-    fd->read_q     = NULL;
-    fd->write_q    = NULL;
-    fd->wait_q     = NULL;
+    fd->waiters    = NULL;
     fd->completion = NULL;
     list_init( &fd->inode_entry );
     list_init( &fd->locks );
@@ -1982,18 +1971,16 @@ unsigned int default_fd_map_access( struct object *obj, unsigned int access )
 
 int default_fd_get_poll_events( struct fd *fd )
 {
-    int events = 0;
-
-    if (async_waiting( fd->read_q )) events |= POLLIN;
-    if (async_waiting( fd->write_q )) events |= POLLOUT;
-    return events;
+    return async_get_poll_events( fd->waiters );
 }
 
 /* default handler for poll() events */
 void default_poll_event( struct fd *fd, int event )
 {
-    if (event & (POLLIN | POLLERR | POLLHUP)) async_wake_up( fd->read_q, POLLIN, STATUS_ALERTED );
-    if (event & (POLLOUT | POLLERR | POLLHUP)) async_wake_up( fd->write_q, POLLOUT, STATUS_ALERTED );
+    if ( event & (POLLIN|POLLOUT) )
+        async_wake_up( fd->waiters, event, STATUS_ALERTED );
+    else if ( event & (POLLERR|POLLHUP) )
+        async_wake_up( fd->waiters, POLLIN|POLLOUT, STATUS_ALERTED );
 
     /* if an error occurred, stop polling this fd to avoid busy-looping */
     if (event & (POLLERR | POLLHUP)) set_fd_events( fd, -1 );
@@ -2002,54 +1989,24 @@ void default_poll_event( struct fd *fd, int event )
 
 struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int pollev )
 {
-    struct async_queue *queue;
     struct async *async;
 
-    switch (pollev)
-    {
-    case POLLIN:
-        if (!fd->read_q && !(fd->read_q = create_async_queue( fd ))) return NULL;
-        queue = fd->read_q;
-        break;
-    case POLLOUT:
-        if (!fd->write_q && !(fd->write_q = create_async_queue( fd ))) return NULL;
-        queue = fd->write_q;
-        break;
-    case 0:
-        if (!fd->wait_q && !(fd->wait_q = create_async_queue( fd ))) return NULL;
-        queue = fd->wait_q;
-        break;
-    default:
-        queue = NULL;
-        assert(0);
-    }
+    if (!fd->waiters && !(fd->waiters = create_async_queue( fd )))
+        return NULL;
 
-    if ((async = create_async( current, queue, pollev, data )) && pollev)
+    if ((async = create_async( current, fd->waiters, pollev, data )) && pollev)
     {
         if (!fd->inode)
             set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
         else  /* regular files are always ready for read and write */
-            async_wake_up( queue, pollev, STATUS_ALERTED );
+            async_wake_up( fd->waiters, pollev, STATUS_ALERTED );
     }
     return async;
 }
 
 void fd_async_wake_up( struct fd *fd, int pollev, unsigned int status )
 {
-    switch (pollev)
-    {
-    case POLLIN:
-        async_wake_up( fd->read_q, pollev, status );
-        break;
-    case POLLOUT:
-        async_wake_up( fd->write_q, pollev, status );
-        break;
-    case 0:
-        async_wake_up( fd->wait_q, 0, status );
-        break;
-    default:
-        assert(0);
-    }
+    async_wake_up( fd->waiters, pollev, status );
 }
 
 void fd_async_progress( struct fd *fd, const async_data_t *data, int pollev, int status )
@@ -2090,9 +2047,7 @@ void default_fd_cancel_async( struct fd *fd, struct process *process, struct thr
 {
     int n = 0;
 
-    n += async_wake_up_by( fd->read_q, process, thread, iosb, STATUS_CANCELLED );
-    n += async_wake_up_by( fd->write_q, process, thread, iosb, STATUS_CANCELLED );
-    n += async_wake_up_by( fd->wait_q, process, thread, iosb, STATUS_CANCELLED );
+    n += async_wake_up_by( fd->waiters, process, thread, iosb, STATUS_CANCELLED );
     if (!n && iosb)
         set_error( STATUS_NOT_FOUND );
 }
