@@ -147,8 +147,8 @@ extern void async_set_timeout( struct async *async, timeout_t timeout, unsigned 
 extern void async_set_result( struct object *obj, unsigned int status,
                               unsigned int total, client_ptr_t apc );
 extern int async_get_poll_events( struct async_queue *queue );
-extern int async_queued( struct async_queue *queue );
-extern int async_waiting( struct async_queue *queue );
+extern int async_queued( struct async_queue *queue, int pollev );
+extern int async_waiting( struct async_queue *queue, int pollev );
 extern void async_terminate( struct async *async, unsigned int status );
 extern int async_wake_up_by( struct async_queue *queue, struct process *process,
                              struct thread *thread, client_ptr_t iosb, unsigned int status );

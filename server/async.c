@@ -300,21 +300,36 @@ int async_get_poll_events( struct async_queue *queue )
 }
 
 /* check if there are any queued async operations */
-int async_queued( struct async_queue *queue )
+int async_queued( struct async_queue *queue, int pollev )
 {
-    return queue && list_head( &queue->queue );
+    struct list *ptr, *next;
+
+    if (!queue) return 0;
+    LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
+    {
+        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+
+        if ( async->pollev == pollev || async->pollev & pollev || pollev == -1 )
+            return 1;
+    }
+    return 0;
 }
 
 /* check if an async operation is waiting to be alerted */
-int async_waiting( struct async_queue *queue )
+int async_waiting( struct async_queue *queue, int pollev )
 {
-    struct list *ptr;
-    struct async *async;
+    struct list *ptr, *next;
 
     if (!queue) return 0;
-    if (!(ptr = list_head( &queue->queue ))) return 0;
-    async = LIST_ENTRY( ptr, struct async, queue_entry );
-    return async->status == STATUS_PENDING;
+    LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
+    {
+        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+
+        if ( async->status == STATUS_PENDING &&
+             (async->pollev == pollev || async->pollev & pollev || pollev == -1) )
+            return 1;
+    }
+    return 0;
 }
 
 int async_wake_up_by( struct async_queue *queue, struct process *process,

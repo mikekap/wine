@@ -107,8 +107,7 @@ struct sock
     obj_handle_t        wparam;      /* message wparam (socket handle) */
     int                 errors[FD_MAX_EVENTS]; /* event errors */
     struct sock        *deferred;    /* socket that waits for a deferred accept */
-    struct async_queue *read_q;      /* queue for asynchronous reads */
-    struct async_queue *write_q;     /* queue for asynchronous writes */
+    struct async_queue *waiters;     /* queue for asynchronous reads */
 };
 
 static void sock_dump( struct object *obj, int verbose );
@@ -262,7 +261,7 @@ static void sock_wake_up( struct sock *sock )
 
     /* Do not signal events if there are still pending asynchronous IO requests */
     /* We need this to delay FD_CLOSE events until all pending overlapped requests are processed */
-    if ( !events || async_queued( sock->read_q ) || async_queued( sock->write_q ) ) return;
+    if ( !events || async_queued( sock->waiters, -1 ) ) return;
 
     if (sock->event)
     {
@@ -299,15 +298,13 @@ static void sock_dispatch_asyncs( struct sock *sock, int event )
 {
     if ( sock->flags & WSA_FLAG_OVERLAPPED )
     {
-        if ( event & (POLLIN|POLLPRI|POLLERR|POLLHUP) && async_waiting( sock->read_q ))
+        if ( async_waiting( sock->waiters, event ) || event & (POLLERR|POLLHUP) )
         {
-            if (debug_level) fprintf( stderr, "activating read queue for socket %p\n", sock );
-            async_wake_up( sock->read_q, POLLIN, STATUS_ALERTED );
-        }
-        if ( event & (POLLOUT|POLLERR|POLLHUP) && async_waiting( sock->write_q ))
-        {
-            if (debug_level) fprintf( stderr, "activating write queue for socket %p\n", sock );
-            async_wake_up( sock->write_q, POLLOUT, STATUS_ALERTED );
+            /* wake up anything if we are closing */
+            if (event & (POLLERR|POLLHUP)) event |= POLLIN|POLLOUT;
+
+            if (debug_level) fprintf( stderr, "activating queue for socket %p\n", sock );
+            async_wake_up( sock->waiters, event, STATUS_ALERTED );
         }
     }
 }
@@ -484,23 +481,23 @@ static int sock_get_poll_events( struct fd *fd )
         /* listening, wait for readable */
         return (mask & FD_ACCEPT) ? POLLIN : 0;
 
-    if ( async_queued( sock->read_q ) )
-    {
-        if ( async_waiting( sock->read_q ) ) ev |= POLLIN | POLLPRI;
-    }
-    else if (smask & FD_READ)
-        ev |= POLLIN | POLLPRI;
-    /* We use POLLIN with 0 bytes recv() as FD_CLOSE indication for stream sockets. */
-    else if ( sock->type == SOCK_STREAM && sock->state & FD_READ && mask & FD_CLOSE &&
-              !(sock->hmask & FD_READ) )
-        ev |= POLLIN;
+    ev |= async_get_poll_events( sock->waiters );
 
-    if ( async_queued( sock->write_q ) )
+    if ( !async_queued( sock->waiters, POLLIN ) )
     {
-        if ( async_waiting( sock->write_q ) ) ev |= POLLOUT;
+        if (smask & FD_READ)
+            ev |= POLLIN | POLLPRI;
+        /* We use POLLIN with 0 bytes recv() as FD_CLOSE indication for stream sockets. */
+        else if ( sock->type == SOCK_STREAM && sock->state & FD_READ && mask & FD_CLOSE &&
+                !(sock->hmask & FD_READ) )
+            ev |= POLLIN;
     }
-    else if (smask & FD_WRITE)
-        ev |= POLLOUT;
+
+    if ( !async_queued( sock->waiters, POLLOUT ) )
+    {
+        if (smask & FD_WRITE)
+            ev |= POLLOUT;
+    }
 
     return ev;
 }
@@ -513,24 +510,17 @@ static enum server_fd_type sock_get_fd_type( struct fd *fd )
 static void sock_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
 {
     struct sock *sock = get_fd_user( fd );
-    struct async_queue *queue;
 
     assert( sock->obj.ops == &sock_ops );
 
-    switch (pollev)
+    if (pollev != POLLIN && pollev != POLLOUT)
     {
-    case POLLIN:
-        if (!sock->read_q && !(sock->read_q = create_async_queue( sock->fd ))) return;
-        queue = sock->read_q;
-        break;
-    case POLLOUT:
-        if (!sock->write_q && !(sock->write_q = create_async_queue( sock->fd ))) return;
-        queue = sock->write_q;
-        break;
-    default:
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
+
+    if (!sock->waiters && !(sock->waiters = create_async_queue( sock->fd )))
+        return;
 
     if ( ( !( sock->state & FD_READ ) && pollev == POLLIN  ) ||
          ( !( sock->state & FD_WRITE ) && pollev == POLLOUT ) )
@@ -540,7 +530,7 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int polle
     else
     {
         struct async *async;
-        if (!(async = create_async( current, queue, pollev, data ))) return;
+        if (!(async = create_async( current, sock->waiters, pollev, data ))) return;
         release_object( async );
         set_error( STATUS_PENDING );
     }
@@ -560,8 +550,7 @@ static void sock_cancel_async( struct fd *fd, struct process *process, struct th
     int n = 0;
     assert( sock->obj.ops == &sock_ops );
 
-    n += async_wake_up_by( sock->read_q, process, thread, iosb, STATUS_CANCELLED );
-    n += async_wake_up_by( sock->write_q, process, thread, iosb, STATUS_CANCELLED );
+    n += async_wake_up_by( sock->waiters, process, thread, iosb, STATUS_CANCELLED );
     if (!n && iosb)
         set_error( STATUS_NOT_FOUND );
 }
@@ -582,8 +571,7 @@ static void sock_destroy( struct object *obj )
     if ( sock->deferred )
         release_object( sock->deferred );
 
-    free_async_queue( sock->read_q );
-    free_async_queue( sock->write_q );
+    free_async_queue( sock->waiters );
     if (sock->event) release_object( sock->event );
     if (sock->fd)
     {
@@ -626,8 +614,7 @@ static struct object *create_socket( int family, int type, int protocol, unsigne
     sock->message = 0;
     sock->wparam  = 0;
     sock->deferred = NULL;
-    sock->read_q  = NULL;
-    sock->write_q = NULL;
+    sock->waiters = NULL;
     memset( sock->errors, 0, sizeof(sock->errors) );
     if (!(sock->fd = create_anonymous_fd( &sock_fd_ops, sockfd, &sock->obj,
                             (flags & WSA_FLAG_OVERLAPPED) ? 0 : FILE_SYNCHRONOUS_IO_NONALERT )))
@@ -697,8 +684,7 @@ static struct sock *accept_socket( obj_handle_t handle )
         if (sock->event) acceptsock->event = (struct event *)grab_object( sock->event );
         acceptsock->flags = sock->flags;
         acceptsock->deferred = NULL;
-        acceptsock->read_q  = NULL;
-        acceptsock->write_q = NULL;
+        acceptsock->waiters = NULL;
         memset( acceptsock->errors, 0, sizeof(acceptsock->errors) );
         if (!(acceptsock->fd = create_anonymous_fd( &sock_fd_ops, acceptfd, &acceptsock->obj,
                                                     get_fd_options( sock->fd ) )))
