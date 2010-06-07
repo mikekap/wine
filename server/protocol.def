@@ -2103,13 +2103,10 @@ enum message_type
 
 /* Create an async I/O */
 @REQ(register_async)
-    int          type;          /* type of queue to look after */
+    int          events;        /* events to poll for (POLLIN, ...), POLLNVAL allowed */
     async_data_t async;         /* async I/O parameters */
     int          count;         /* count - usually # of bytes to be read/written */
 @END
-#define ASYNC_TYPE_READ  0x01
-#define ASYNC_TYPE_WRITE 0x02
-#define ASYNC_TYPE_WAIT  0x03
 
 
 /* Cancel all async op on a fd */

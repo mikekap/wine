@@ -1598,8 +1598,8 @@ static NTSTATUS WS2_async_shutdown( void* user, PIO_STATUS_BLOCK iosb, NTSTATUS 
 
         switch ( wsa->type )
         {
-        case ASYNC_TYPE_READ:   err = shutdown( fd, 0 );  break;
-        case ASYNC_TYPE_WRITE:  err = shutdown( fd, 1 );  break;
+        case POLLIN:   err = shutdown( fd, 0 );  break;
+        case POLLOUT:  err = shutdown( fd, 1 );  break;
         }
         status = err ? wsaErrStatus() : STATUS_SUCCESS;
         wine_server_release_fd( wsa->hSocket, fd );
@@ -1616,24 +1616,24 @@ static NTSTATUS WS2_async_shutdown( void* user, PIO_STATUS_BLOCK iosb, NTSTATUS 
  *
  * Helper function for WS_shutdown() on overlapped sockets.
  */
-static int WS2_register_async_shutdown( SOCKET s, int type )
+static int WS2_register_async_shutdown( SOCKET s, int events )
 {
     struct ws2_async *wsa;
     NTSTATUS status;
 
-    TRACE("s %ld type %d\n", s, type);
+    TRACE("s %ld type %d\n", s, events);
 
     wsa = HeapAlloc( GetProcessHeap(), 0, sizeof(*wsa) );
     if ( !wsa )
         return WSAEFAULT;
 
     wsa->hSocket         = SOCKET2HANDLE(s);
-    wsa->type            = type;
+    wsa->type            = events;
     wsa->completion_func = NULL;
 
     SERVER_START_REQ( register_async )
     {
-        req->type   = type;
+        req->events   = events;
         req->async.handle   = wine_server_obj_handle( wsa->hSocket );
         req->async.callback = wine_server_client_ptr( WS2_async_shutdown );
         req->async.iosb     = wine_server_client_ptr( &wsa->local_iosb );
@@ -3232,7 +3232,7 @@ INT WINAPI WSASendTo( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
             SERVER_START_REQ( register_async )
             {
-                req->type           = ASYNC_TYPE_WRITE;
+                req->events         = POLLOUT;
                 req->async.handle   = wine_server_obj_handle( wsa->hSocket );
                 req->async.callback = wine_server_client_ptr( WS2_async_send );
                 req->async.iosb     = wine_server_client_ptr( iosb );
@@ -3656,15 +3656,15 @@ int WINAPI WS_shutdown(SOCKET s, int how)
         switch ( how )
         {
         case SD_RECEIVE:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_READ );
+            err = WS2_register_async_shutdown( s, POLLIN );
             break;
         case SD_SEND:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_WRITE );
+            err = WS2_register_async_shutdown( s, POLLOUT );
             break;
         case SD_BOTH:
         default:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_READ );
-            if (!err) err = WS2_register_async_shutdown( s, ASYNC_TYPE_WRITE );
+            err = WS2_register_async_shutdown( s, POLLIN );
+            if (!err) err = WS2_register_async_shutdown( s, POLLOUT );
             break;
         }
         if (err) goto error;
@@ -5018,7 +5018,7 @@ INT WINAPI WSARecvFrom( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
                 SERVER_START_REQ( register_async )
                 {
-                    req->type           = ASYNC_TYPE_READ;
+                    req->events         = POLLIN;
                     req->async.handle   = wine_server_obj_handle( wsa->hSocket );
                     req->async.callback = wine_server_client_ptr( WS2_async_recv );
                     req->async.iosb     = wine_server_client_ptr( iosb );

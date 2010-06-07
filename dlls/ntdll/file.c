@@ -681,7 +681,7 @@ NTSTATUS WINAPI NtReadFile(HANDLE hFile, HANDLE hEvent,
 
             SERVER_START_REQ( register_async )
             {
-                req->type   = ASYNC_TYPE_READ;
+                req->events = POLLIN;
                 req->count  = length;
                 req->async.handle   = wine_server_obj_handle( hFile );
                 req->async.event    = wine_server_obj_handle( hEvent );
@@ -1015,7 +1015,7 @@ NTSTATUS WINAPI NtWriteFile(HANDLE hFile, HANDLE hEvent,
 
             SERVER_START_REQ( register_async )
             {
-                req->type   = ASYNC_TYPE_WRITE;
+                req->events = POLLOUT;
                 req->count  = length;
                 req->async.handle   = wine_server_obj_handle( hFile );
                 req->async.event    = wine_server_obj_handle( hEvent );

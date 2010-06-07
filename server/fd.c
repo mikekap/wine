@@ -2251,28 +2251,24 @@ DECL_HANDLER(ioctl)
 /* create / reschedule an async I/O */
 DECL_HANDLER(register_async)
 {
-    unsigned int access;
-    int events;
+    unsigned int access = 0;
     struct fd *fd;
 
-    switch(req->type)
+    /* POLLERR is allowed, no events aren't */
+    if (req->events & (POLLHUP|POLLNVAL) || !req->events)
     {
-    case ASYNC_TYPE_READ:
-        access = FILE_READ_DATA;
-        events = POLLIN;
-        break;
-    case ASYNC_TYPE_WRITE:
-        access = FILE_WRITE_DATA;
-        events = POLLOUT;
-        break;
-    default:
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
 
+    if (req->events & (POLLIN|POLLPRI))
+        access |= FILE_READ_DATA;
+    if (req->events & POLLOUT)
+        access |= FILE_WRITE_DATA;
+
     if ((fd = get_handle_fd_obj( current->process, req->async.handle, access )))
     {
-        if (get_unix_fd( fd ) != -1) fd->fd_ops->queue_async( fd, &req->async, events, req->count );
+        if (get_unix_fd( fd ) != -1) fd->fd_ops->queue_async( fd, &req->async, req->events, req->count );
         release_object( fd );
     }
 }
