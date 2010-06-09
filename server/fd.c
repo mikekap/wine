@@ -2052,9 +2052,9 @@ void fd_async_wake_up( struct fd *fd, int pollev, unsigned int status )
     }
 }
 
-void fd_reselect_async( struct fd *fd, struct async_queue *queue )
+void fd_async_progress( struct fd *fd, const async_data_t *data, int pollev, int status )
 {
-    fd->fd_ops->reselect_async( fd, queue );
+    fd->fd_ops->async_progress( fd, data, pollev, status );
 }
 
 void no_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
@@ -2073,10 +2073,10 @@ void default_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev
     }
 }
 
-/* default reselect_async() fd routine */
-void default_fd_reselect_async( struct fd *fd, struct async_queue *queue )
+/* default async_progress() fd routine */
+void default_fd_async_progress( struct fd *fd, const async_data_t *data, int pollev, int status )
 {
-    if (queue != fd->wait_q)
+    if (pollev)
     {
         int poll_events = fd->fd_ops->get_poll_events( fd );
         int events = check_fd_events( fd, poll_events );

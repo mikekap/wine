@@ -173,7 +173,7 @@ static const struct fd_ops msg_queue_fd_ops =
     NULL,                        /* get_fd_type */
     NULL,                        /* ioctl */
     NULL,                        /* queue_async */
-    NULL,                        /* reselect_async */
+    NULL,                        /* async_progress */
     NULL                         /* cancel async */
 };
 

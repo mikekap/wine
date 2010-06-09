@@ -156,7 +156,7 @@ static const struct fd_ops thread_fd_ops =
     NULL,                       /* get_fd_type */
     NULL,                       /* ioctl */
     NULL,                       /* queue_async */
-    NULL,                       /* reselect_async */
+    NULL,                       /* async_progress */
     NULL                        /* cancel_async */
 };
 

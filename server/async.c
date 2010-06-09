@@ -102,9 +102,9 @@ static const struct object_ops async_queue_ops =
 };
 
 
-static inline void async_reselect( struct async *async )
+static inline void async_progress( struct async *async )
 {
-    if (async->queue->fd) fd_reselect_async( async->queue->fd, async->queue );
+    if (async->queue->fd) fd_async_progress( async->queue->fd, &async->data, async->pollev, async->status );
 }
 
 static void async_dump( struct object *obj, int verbose )
@@ -120,7 +120,8 @@ static void async_destroy( struct object *obj )
     assert( obj->ops == &async_ops );
 
     list_remove( &async->queue_entry );
-    async_reselect( async );
+    async->status = -1;
+    async_progress( async );
 
     if (async->timeout) remove_timeout_user( async->timeout );
     if (async->event) release_object( async->event );
@@ -158,7 +159,8 @@ void async_terminate( struct async *async, unsigned int status )
     data.async_io.status = status;
     thread_queue_apc( async->thread, &async->obj, &data );
     async->status = status;
-    async_reselect( async );
+
+    async_progress( async );
     release_object( async );  /* so that it gets destroyed when the async is done */
 }
 
@@ -253,7 +255,7 @@ void async_set_result( struct object *obj, unsigned int status, unsigned int tot
         if (status != STATUS_ALERTED)  /* it was terminated in the meantime */
             async_terminate( async, status );
         else
-            async_reselect( async );
+            async_progress( async );
     }
     else
     {
