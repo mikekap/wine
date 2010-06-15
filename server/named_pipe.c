@@ -618,13 +618,23 @@ static obj_handle_t pipe_server_ioctl( struct fd *fd, ioctl_code_t code, const a
                 async_data_t new_data = *async_data;
                 if (!(wait_handle = alloc_wait_event( current->process ))) break;
                 new_data.event = wait_handle;
-                if (!(async = fd_queue_async( server->ioctl_fd, &new_data, 0 )))
+                async = create_async( current, &new_data );
+                if (!async || fd_queue_async( server->ioctl_fd, async, 0 ))
                 {
+                    if (async) release_object( async );
                     close_handle( current->process, wait_handle );
                     break;
                 }
             }
-            else async = fd_queue_async( server->ioctl_fd, async_data, 0 );
+            else
+            {
+                async = create_async( current, async_data );
+                if (async && fd_queue_async( server->ioctl_fd, async, 0 ))
+                {
+                    release_object( async );
+                    async = NULL;
+                }
+            }
 
             if (async)
             {
@@ -901,17 +911,21 @@ static obj_handle_t named_pipe_device_ioctl( struct fd *fd, ioctl_code_t code, c
                     async_data_t new_data = *async_data;
                     if (!(wait_handle = alloc_wait_event( current->process ))) goto done;
                     new_data.event = wait_handle;
-                    if (!(async = create_async( current, pipe->waiters, 0, &new_data )))
+                    async = create_async( current, &new_data );
+                    if (!async)
                     {
                         close_handle( current->process, wait_handle );
                         wait_handle = 0;
                     }
                 }
-                else async = create_async( current, pipe->waiters, 0, async_data );
+                else
+                    async = create_async( current, async_data );
 
                 if (async)
                 {
                     timeout_t when = buffer->TimeoutSpecified ? buffer->Timeout.QuadPart : pipe->timeout;
+
+                    queue_async( pipe->waiters, async, 0 );
                     async_set_timeout( async, when, STATUS_IO_TIMEOUT );
                     release_object( async );
                     set_error( STATUS_PENDING );

@@ -182,7 +182,7 @@ static void ioctl_call_destroy( struct object *obj )
     free( ioctl->out_data );
     if (ioctl->async)
     {
-        async_terminate( ioctl->async, STATUS_CANCELLED );
+        async_terminate( ioctl->device->ioctl_queue, ->async, STATUS_CANCELLED );
         release_object( ioctl->async );
     }
     if (ioctl->device) release_object( ioctl->device );
@@ -230,7 +230,7 @@ static void set_ioctl_result( struct ioctl_call *ioctl, unsigned int status,
     if (ioctl->async)
     {
         if (ioctl->out_size) status = STATUS_ALERTED;
-        async_terminate( ioctl->async, status );
+        async_terminate( ioctl->device->device_queue, ioctl->async, status );
         release_object( ioctl->async );
         ioctl->async = NULL;
     }
@@ -341,12 +341,15 @@ static obj_handle_t device_ioctl( struct fd *fd, ioctl_code_t code, const async_
         return 0;
     }
 
-    if (!(ioctl->async = create_async( current, device->ioctl_queue, 0, async_data )))
+    ioctl->async = create_async( current, async_data );
+    if (!ioctl->async)
     {
+        if (ioctl->async) release_object( ioctl->async );
         close_handle( current->process, handle );
         release_object( ioctl );
         return 0;
     }
+    queue_async( device->ioctl_queue, ioctl->async, 0 );
     list_add_tail( &device->requests, &ioctl->dev_entry );
     list_add_tail( &device->manager->requests, &ioctl->mgr_entry );
     if (list_head( &device->manager->requests ) == &ioctl->mgr_entry)  /* first one */

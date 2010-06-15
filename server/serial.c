@@ -62,7 +62,7 @@ static void serial_destroy(struct object *obj);
 
 static enum server_fd_type serial_get_fd_type( struct fd *fd );
 static void serial_flush( struct fd *fd, struct event **event );
-static void serial_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
+static void serial_queue_async( struct fd *fd, struct async *async, int pollev, int count );
 
 struct serial
 {
@@ -170,11 +170,10 @@ static enum server_fd_type serial_get_fd_type( struct fd *fd )
     return FD_TYPE_SERIAL;
 }
 
-static void serial_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
+static void serial_queue_async( struct fd *fd, struct async *async, int pollev, int count )
 {
     struct serial *serial = get_fd_user( fd );
     timeout_t timeout = 0;
-    struct async *async;
 
     assert(serial->obj.ops == &serial_ops);
 
@@ -191,10 +190,9 @@ static void serial_queue_async( struct fd *fd, const async_data_t *data, int pol
         return;
     }
 
-    if ((async = fd_queue_async( fd, data, pollev )))
+    if (!fd_queue_async( fd, async, pollev ))
     {
         if (timeout) async_set_timeout( async, timeout * -10000, STATUS_TIMEOUT );
-        release_object( async );
         set_error( STATUS_PENDING );
     }
 }

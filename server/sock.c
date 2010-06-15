@@ -118,7 +118,7 @@ static void sock_destroy( struct object *obj );
 static int sock_get_poll_events( struct fd *fd );
 static void sock_poll_event( struct fd *fd, int event );
 static enum server_fd_type sock_get_fd_type( struct fd *fd );
-static void sock_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count );
+static void sock_queue_async( struct fd *fd, struct async *async, int pollev, int count );
 static void sock_async_progress( struct fd *fd, const async_data_t *data, int pollev, int status );
 static void sock_cancel_async( struct fd *fd, struct process *process, struct thread *thread, client_ptr_t iosb );
 
@@ -507,7 +507,7 @@ static enum server_fd_type sock_get_fd_type( struct fd *fd )
     return FD_TYPE_SOCKET;
 }
 
-static void sock_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
+static void sock_queue_async( struct fd *fd, struct async *async, int pollev, int count )
 {
     struct sock *sock = get_fd_user( fd );
 
@@ -526,16 +526,12 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int polle
          ( !( sock->state & FD_WRITE ) && pollev == POLLOUT ) )
     {
         set_error( STATUS_PIPE_DISCONNECTED );
-    }
-    else
-    {
-        struct async *async;
-        if (!(async = create_async( current, sock->waiters, pollev, data ))) return;
-        release_object( async );
-        set_error( STATUS_PENDING );
+        return;
     }
 
-    sock_reselect( sock );
+    queue_async( sock->waiters, async, pollev );
+
+    set_error( STATUS_PENDING );
 }
 
 static void sock_async_progress( struct fd *fd, const async_data_t *data, int pollev, int status )

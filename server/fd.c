@@ -1987,21 +1987,21 @@ void default_poll_event( struct fd *fd, int event )
     else if (!fd->inode) set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
 }
 
-struct async *fd_queue_async( struct fd *fd, const async_data_t *data, int pollev )
+int fd_queue_async( struct fd *fd, struct async *async, int pollev )
 {
-    struct async *async;
-
     if (!fd->waiters && !(fd->waiters = create_async_queue( fd )))
-        return NULL;
+        return -1;
 
-    if ((async = create_async( current, fd->waiters, pollev, data )) && pollev)
+    queue_async( fd->waiters, async, pollev );
+
+    if (pollev)
     {
         if (!fd->inode)
             set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
         else  /* regular files are always ready for read and write */
             async_wake_up( fd->waiters, pollev, STATUS_ALERTED );
     }
-    return async;
+    return 0;
 }
 
 void fd_async_wake_up( struct fd *fd, int pollev, unsigned int status )
@@ -2014,20 +2014,15 @@ void fd_async_progress( struct fd *fd, const async_data_t *data, int pollev, int
     fd->fd_ops->async_progress( fd, data, pollev, status );
 }
 
-void no_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
+void no_fd_queue_async( struct fd *fd, struct async *async, int pollev, int count )
 {
     set_error( STATUS_OBJECT_TYPE_MISMATCH );
 }
 
-void default_fd_queue_async( struct fd *fd, const async_data_t *data, int pollev, int count )
+void default_fd_queue_async( struct fd *fd, struct async *async, int pollev, int count )
 {
-    struct async *async;
-
-    if ((async = fd_queue_async( fd, data, pollev )))
-    {
-        release_object( async );
+    if (!fd_queue_async( fd, async, pollev ))
         set_error( STATUS_PENDING );
-    }
 }
 
 /* default async_progress() fd routine */
@@ -2253,6 +2248,7 @@ DECL_HANDLER(register_async)
 {
     unsigned int access = 0;
     struct fd *fd;
+    struct async *async;
 
     /* POLLERR is allowed, no events aren't */
     if (req->events & (POLLHUP|POLLNVAL) || !req->events)
@@ -2268,7 +2264,15 @@ DECL_HANDLER(register_async)
 
     if ((fd = get_handle_fd_obj( current->process, req->async.handle, access )))
     {
-        if (get_unix_fd( fd ) != -1) fd->fd_ops->queue_async( fd, &req->async, req->events, req->count );
+        if (get_unix_fd( fd ) != -1)
+        {
+            async = create_async( current, &req->async );
+            if (async)
+            {
+                fd->fd_ops->queue_async( fd, async, req->events, req->count );
+                release_object( async );
+            }
+        }
         release_object( fd );
     }
 }

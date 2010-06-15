@@ -121,14 +121,17 @@ static void async_destroy( struct object *obj )
     struct async *async = (struct async *)obj;
     assert( obj->ops == &async_ops );
 
-    list_remove( &async->queue_entry );
-    async->status = -1;
-    async_progress( async );
+    if (async->queue)
+    {
+        list_remove( &async->queue_entry );
+        async->status = -1;
+        async_progress( async );
+    }
 
     if (async->timeout) remove_timeout_user( async->timeout );
     if (async->event) release_object( async->event );
     if (async->completion) release_object( async->completion );
-    release_object( async->queue );
+    if (async->queue) release_object( async->queue );
     release_object( async->thread );
 }
 
@@ -197,8 +200,8 @@ void free_async_queue( struct async_queue *queue )
     release_object( queue );
 }
 
-/* create an async on a given queue of a fd */
-struct async *create_async( struct thread *thread, struct async_queue *queue, int pollev, const async_data_t *data )
+/* create an async */
+struct async *create_async( struct thread *thread, const async_data_t *data )
 {
     struct event *event = NULL;
     struct async *async;
@@ -217,17 +220,28 @@ struct async *create_async( struct thread *thread, struct async_queue *queue, in
     async->status  = STATUS_PENDING;
     async->data    = *data;
     async->timeout = NULL;
-    async->queue   = (struct async_queue *)grab_object( queue );
-    async->pollev  = pollev;
+    async->queue   = NULL;
+    async->pollev  = 0;
     async->completion = NULL;
-    if (queue->fd) async->completion = fd_get_completion( queue->fd, &async->comp_key );
 
-    list_add_tail( &queue->queue, &async->queue_entry );
-    grab_object( async );
-
-    if (queue->fd) set_fd_signaled( queue->fd, 0 );
     if (event) reset_event( event );
     return async;
+}
+
+/* queue an async onto a fd's queue */
+void queue_async( struct async_queue *queue, struct async *async, int pollev )
+{
+    assert(!async->queue);
+
+    async->pollev = pollev;
+    async->queue = (struct async_queue *) grab_object( queue );
+    if (queue->fd)
+    {
+        async->completion = fd_get_completion( queue->fd, &async->comp_key );
+        set_fd_signaled( queue->fd, 0 );
+    }
+    grab_object( async );
+    list_add_tail( &queue->queue, &async->queue_entry );
 }
 
 /* set the timeout of an async operation */
