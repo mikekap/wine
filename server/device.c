@@ -344,7 +344,6 @@ static obj_handle_t device_ioctl( struct fd *fd, ioctl_code_t code, const async_
     ioctl->async = create_async( current, async_data );
     if (!ioctl->async)
     {
-        if (ioctl->async) release_object( ioctl->async );
         close_handle( current->process, handle );
         release_object( ioctl );
         return 0;

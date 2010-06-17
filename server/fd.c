@@ -2270,6 +2270,7 @@ DECL_HANDLER(register_async)
             if (async)
             {
                 fd->fd_ops->queue_async( fd, async, req->events, req->count );
+
                 release_object( async );
             }
         }

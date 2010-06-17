@@ -34,13 +34,20 @@
 #include "file.h"
 #include "request.h"
 
+struct async_poll_fd
+{
+    struct list          queue_entry;     /* entry in async queue list */
+    struct list          async_entry;     /* entry in async list */
+    struct async_queue  *queue;           /* queue containing this async */
+    struct async        *async;
+    int                  pollev;          /* poll events this async waiting for */
+    int                  woken;
+};
+
 struct async
 {
     struct object        obj;             /* object header */
     struct thread       *thread;          /* owning thread */
-    struct list          queue_entry;     /* entry in async queue list */
-    struct async_queue  *queue;           /* queue containing this async */
-    int                  pollev;          /* poll events this async waiting for */
     unsigned int         status;          /* current status */
     struct timeout_user *timeout;
     unsigned int         timeout_status;  /* status to report upon timeout */
@@ -48,6 +55,7 @@ struct async
     struct completion   *completion;
     apc_param_t          comp_key;
     async_data_t         data;            /* data for async I/O call */
+    struct list          pollfds;
 };
 
 static void async_dump( struct object *obj, int verbose );
@@ -106,7 +114,12 @@ static const struct object_ops async_queue_ops =
 
 static inline void async_progress( struct async *async )
 {
-    if (async->queue->fd) fd_async_progress( async->queue->fd, &async->data, async->pollev, async->status );
+    struct async_poll_fd *curr;
+
+    LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
+    {
+        if (curr->queue->fd) fd_async_progress( curr->queue->fd, &async->data, curr->pollev, async->status );
+    }
 }
 
 static void async_dump( struct object *obj, int verbose )
@@ -119,19 +132,24 @@ static void async_dump( struct object *obj, int verbose )
 static void async_destroy( struct object *obj )
 {
     struct async *async = (struct async *)obj;
+    struct async_poll_fd *curr, *next;
     assert( obj->ops == &async_ops );
 
-    if (async->queue)
+    LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
     {
-        list_remove( &async->queue_entry );
-        async->status = -1;
-        async_progress( async );
+        list_remove( &curr->queue_entry );
     }
+    async->status = -1;
+    async_progress( async );
 
+    LIST_FOR_EACH_ENTRY_SAFE( curr, next, &async->pollfds, struct async_poll_fd, async_entry )
+    {
+        release_object( curr->queue );
+        free( curr );
+    }
     if (async->timeout) remove_timeout_user( async->timeout );
     if (async->event) release_object( async->event );
     if (async->completion) release_object( async->completion );
-    if (async->queue) release_object( async->queue );
     release_object( async->thread );
 }
 
@@ -143,9 +161,11 @@ static void async_queue_dump( struct object *obj, int verbose )
 }
 
 /* notifies client thread of new status of its async request */
-void async_terminate( struct async *async, unsigned int status )
+void async_terminate( struct async_queue *queue, struct async *async, unsigned int status )
 {
     apc_call_t data;
+    struct async_poll_fd *curr;
+    int allwoken;
 
     assert( status != STATUS_PENDING );
 
@@ -156,6 +176,22 @@ void async_terminate( struct async *async, unsigned int status )
         return;
     }
 
+    if (status == STATUS_ALERTED)
+    {
+        assert( queue );
+
+        allwoken = 1;
+        LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
+        {
+            if (curr->queue == queue)
+                curr->woken = 1;
+            if (!curr->woken && curr->pollev & ~POLLERR)
+                allwoken = 0;
+        }
+
+        if (!allwoken) return;
+    }
+
     memset( &data, 0, sizeof(data) );
     data.type            = APC_ASYNC_IO;
     data.async_io.func   = async->data.callback;
@@ -164,9 +200,14 @@ void async_terminate( struct async *async, unsigned int status )
     data.async_io.status = status;
     thread_queue_apc( async->thread, &async->obj, &data );
     async->status = status;
-
     async_progress( async );
-    release_object( async );  /* so that it gets destroyed when the async is done */
+
+    grab_object( async );
+    LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
+    {
+        release_object( async );  /* so that it gets destroyed when the async is done */
+    }
+    release_object( async );
 }
 
 /* callback for timeout on an async request */
@@ -175,7 +216,7 @@ static void async_timeout( void *private )
     struct async *async = private;
 
     async->timeout = NULL;
-    async_terminate( async, async->timeout_status );
+    async_terminate( NULL, async, async->timeout_status );
 }
 
 /* create a new async queue for a given fd */
@@ -220,9 +261,8 @@ struct async *create_async( struct thread *thread, const async_data_t *data )
     async->status  = STATUS_PENDING;
     async->data    = *data;
     async->timeout = NULL;
-    async->queue   = NULL;
-    async->pollev  = 0;
     async->completion = NULL;
+    list_init( &async->pollfds );
 
     if (event) reset_event( event );
     return async;
@@ -231,17 +271,22 @@ struct async *create_async( struct thread *thread, const async_data_t *data )
 /* queue an async onto a fd's queue */
 void queue_async( struct async_queue *queue, struct async *async, int pollev )
 {
-    assert(!async->queue);
+    struct async_poll_fd *pollfd;
 
-    async->pollev = pollev;
-    async->queue = (struct async_queue *) grab_object( queue );
     if (queue->fd)
     {
-        async->completion = fd_get_completion( queue->fd, &async->comp_key );
+        if (!async->completion && list_empty( &async->pollfds ))
+            async->completion = fd_get_completion( queue->fd, &async->comp_key );
         set_fd_signaled( queue->fd, 0 );
     }
-    grab_object( async );
-    list_add_tail( &queue->queue, &async->queue_entry );
+
+    pollfd = malloc( sizeof(*pollfd) );
+    pollfd->queue = (struct async_queue *) grab_object( queue );
+    pollfd->async = (struct async *) grab_object( async );
+    list_add_tail( &queue->queue, &pollfd->queue_entry );
+    list_add_tail( &async->pollfds, &pollfd->async_entry );
+    pollfd->pollev = pollev;
+    pollfd->woken = 0;
 }
 
 /* set the timeout of an async operation */
@@ -257,6 +302,7 @@ void async_set_timeout( struct async *async, timeout_t timeout, unsigned int sta
 void async_set_result( struct object *obj, unsigned int status, unsigned int total, client_ptr_t apc )
 {
     struct async *async = (struct async *)obj;
+    struct async_poll_fd *curr;
 
     if (obj->ops != &async_ops) return;  /* in case the client messed up the APC results */
 
@@ -266,10 +312,11 @@ void async_set_result( struct object *obj, unsigned int status, unsigned int tot
     {
         status = async->status;
         async->status = STATUS_PENDING;
-        grab_object( async );
+        LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
+            grab_object( async );
 
         if (status != STATUS_ALERTED)  /* it was terminated in the meantime */
-            async_terminate( async, status );
+            async_terminate( NULL, async, status );
         else
             async_progress( async );
     }
@@ -291,8 +338,15 @@ void async_set_result( struct object *obj, unsigned int status, unsigned int tot
             data.user.args[2] = 0;
             thread_queue_apc( async->thread, NULL, &data );
         }
-        if (async->event) set_event( async->event );
-        else if (async->queue->fd) set_fd_signaled( async->queue->fd, 1 );
+        if (async->event)
+            set_event( async->event );
+        else
+        {
+            LIST_FOR_EACH_ENTRY( curr, &async->pollfds, struct async_poll_fd, async_entry )
+            {
+                if (curr->queue->fd) set_fd_signaled( curr->queue->fd, 1 );
+            }
+        }
     }
 }
 
@@ -306,8 +360,8 @@ int async_get_poll_events( struct async_queue *queue )
 
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
-        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
-        if (async->status == STATUS_PENDING)
+        struct async_poll_fd *async = LIST_ENTRY( ptr, struct async_poll_fd, queue_entry );
+        if (!async->woken)
             ev |= async->pollev;
         else
             blocked |= async->pollev;
@@ -323,7 +377,7 @@ int async_queued( struct async_queue *queue, int pollev )
     if (!queue) return 0;
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
-        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+        struct async_poll_fd *async = LIST_ENTRY( ptr, struct async_poll_fd, queue_entry );
 
         if ( async->pollev == pollev || async->pollev & pollev || pollev == -1 )
             return 1;
@@ -339,11 +393,10 @@ int async_waiting( struct async_queue *queue, int pollev )
     if (!queue) return 0;
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
-        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+        struct async_poll_fd *async = LIST_ENTRY( ptr, struct async_poll_fd, queue_entry );
 
-        if ( async->status == STATUS_PENDING &&
-             (async->pollev == pollev || async->pollev & pollev || pollev == -1) )
-            return 1;
+        if ( async->pollev == pollev || async->pollev & pollev || pollev == -1 )
+            return !async->woken;
     }
     return 0;
 }
@@ -358,12 +411,12 @@ int async_wake_up_by( struct async_queue *queue, struct process *process,
 
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
-        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
-        if ( (!process || async->thread->process == process) &&
-             (!thread || async->thread == thread) &&
-             (!iosb || async->data.iosb == iosb) )
+        struct async_poll_fd *async = LIST_ENTRY( ptr, struct async_poll_fd, queue_entry );
+        if ( (!process || async->async->thread->process == process) &&
+             (!thread || async->async->thread == thread) &&
+             (!iosb || async->async->data.iosb == iosb) )
         {
-            async_terminate( async, status );
+            async_terminate( queue, async->async, status );
             woken++;
         }
     }
@@ -379,20 +432,20 @@ void async_wake_up( struct async_queue *queue, int events, unsigned int status )
 
     LIST_FOR_EACH_SAFE( ptr, next, &queue->queue )
     {
-        struct async *async = LIST_ENTRY( ptr, struct async, queue_entry );
+        struct async_poll_fd *async = LIST_ENTRY( ptr, struct async_poll_fd, queue_entry );
         if (status == STATUS_ALERTED)
         {
             /* events == 0 is valid, and we only wake async->events == 0 */
             if ( events == async->pollev || events & async->pollev )
             {
                 events &= ~async->pollev;
-                async_terminate( async, status );
+                async_terminate( queue, async->async, status );
             }
 
             if (!events)
                 break;  /* only wake up the first one, for each event type */
         }
         else
-            async_terminate( async, status );
+            async_terminate( queue, async->async, status );
     }
 }
