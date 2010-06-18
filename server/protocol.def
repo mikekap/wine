@@ -2103,9 +2103,10 @@ enum message_type
 
 /* Create an async I/O */
 @REQ(register_async)
-    int          events;        /* events to poll for (POLLIN, ...), POLLNVAL allowed */
-    async_data_t async;         /* async I/O parameters */
-    int          count;         /* count - usually # of bytes to be read/written */
+    int          events;                /* events to poll for (POLLIN, ...), POLLNVAL allowed */
+    async_data_t async;                 /* async I/O parameters */
+    int          count;                 /* count - usually # of bytes to be read/written */
+    VARARG(depend_fds,user_handles);    /* any fd handles that dependent on this async (i.e. cancel if closed) */
 @END
 
 

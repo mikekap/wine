@@ -513,7 +513,7 @@ static void sock_queue_async( struct fd *fd, struct async *async, int pollev, in
 
     assert( sock->obj.ops == &sock_ops );
 
-    if (pollev != POLLIN && pollev != POLLOUT)
+    if (pollev != POLLIN && pollev != POLLOUT && pollev != POLLERR)
     {
         set_error( STATUS_INVALID_PARAMETER );
         return;

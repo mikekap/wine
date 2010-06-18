@@ -2149,6 +2149,21 @@ void fd_copy_completion( struct fd *src, struct fd *dst )
     dst->completion = fd_get_completion( src, &dst->comp_key );
 }
 
+static struct fd *get_fd_if_real( user_handle_t handle, int access )
+{
+    struct fd *fd;
+
+    if ((fd = get_handle_fd_obj( current->process, handle, access )))
+    {
+        if (get_unix_fd( fd ) == -1)
+        {
+            release_object( fd );
+            fd = NULL;
+        }
+    }
+    return fd;
+}
+
 /* flush a file buffers */
 DECL_HANDLER(flush_file)
 {
@@ -2247,8 +2262,10 @@ DECL_HANDLER(ioctl)
 DECL_HANDLER(register_async)
 {
     unsigned int access = 0;
-    struct fd *fd;
-    struct async *async;
+    struct fd *fd = NULL;
+    struct async *async = NULL;
+    int num_depends = get_req_data_size() / sizeof(user_handle_t), i;
+    struct fd *cdepend;
 
     /* POLLERR is allowed, no events aren't */
     if (req->events & (POLLHUP|POLLNVAL) || !req->events)
@@ -2262,20 +2279,38 @@ DECL_HANDLER(register_async)
     if (req->events & POLLOUT)
         access |= FILE_WRITE_DATA;
 
-    if ((fd = get_handle_fd_obj( current->process, req->async.handle, access )))
-    {
-        if (get_unix_fd( fd ) != -1)
-        {
-            async = create_async( current, &req->async );
-            if (async)
-            {
-                fd->fd_ops->queue_async( fd, async, req->events, req->count );
+    fd = get_fd_if_real( req->async.handle, access );
+    if (!fd)
+        goto error;
 
-                release_object( async );
-            }
+    async = create_async( current, &req->async );
+    if (!async)
+        goto error;
+
+    fd->fd_ops->queue_async( fd, async, req->events, req->count );
+
+    if (get_error() != STATUS_PENDING)
+        goto error;
+
+    for (i = 0; i < num_depends; ++i)
+    {
+        cdepend = get_fd_if_real( *(((user_handle_t *) get_req_data()) + i), FILE_READ_DATA );
+        if (!cdepend) break;
+        cdepend->fd_ops->queue_async( cdepend, async, POLLERR, 0 );
+        if (get_error() != STATUS_PENDING)
+        {
+            release_object(cdepend);
+            break;
         }
-        release_object( fd );
+        release_object(cdepend);
     }
+
+    if (i < num_depends)
+        async_terminate( NULL, async, get_error() ); /* FIXME this will notify... */
+
+error:
+    if (async) release_object( async );
+    if (fd) release_object( fd );
 }
 
 /* cancels all async I/O */
