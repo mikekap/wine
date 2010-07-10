@@ -112,6 +112,7 @@ struct device
     struct object          obj;           /* object header */
     struct device_manager *manager;       /* manager for this device (or NULL if deleted) */
     struct fd             *fd;            /* file descriptor for ioctl */
+    struct async_queue    *ioctl_queue;   /* ioctl's get put here */
     client_ptr_t           user_ptr;      /* opaque ptr for client side */
     struct list            entry;         /* entry in device manager list */
     struct list            requests;      /* list of pending ioctl requests */
@@ -226,8 +227,6 @@ static void set_ioctl_result( struct ioctl_call *ioctl, unsigned int status,
     ioctl->out_size = min( ioctl->out_size, out_size );
     if (ioctl->out_size && !(ioctl->out_data = memdup( out_data, ioctl->out_size )))
         ioctl->out_size = 0;
-    release_object( device );
-    ioctl->device = NULL;
     if (ioctl->async)
     {
         if (ioctl->out_size) status = STATUS_ALERTED;
@@ -235,6 +234,8 @@ static void set_ioctl_result( struct ioctl_call *ioctl, unsigned int status,
         release_object( ioctl->async );
         ioctl->async = NULL;
     }
+    release_object( device );
+    ioctl->device = NULL;
     wake_up( &ioctl->obj, 0 );
 
     if (status != STATUS_ALERTED)
@@ -280,6 +281,7 @@ static void device_destroy( struct object *obj )
         list_remove( &ioctl->dev_entry );
         release_object( ioctl );  /* no longer on the device queue */
     }
+    free_async_queue( device->ioctl_queue );
     if (device->fd) release_object( device->fd );
     if (device->manager) list_remove( &device->entry );
 }
@@ -331,8 +333,15 @@ static obj_handle_t device_ioctl( struct fd *fd, ioctl_code_t code, const async_
         release_object( ioctl );
         return 0;
     }
+    
+    if (!device->ioctl_queue && !(device->ioctl_queue = create_async_queue( device->fd )))
+    {
+        close_handle( current->process, handle );
+        release_object( ioctl );
+        return 0;
+    }
 
-    if (!(ioctl->async = fd_queue_async( device->fd, async_data, 0 )))
+    if (!(ioctl->async = create_async( current, device->ioctl_queue, 0, async_data )))
     {
         close_handle( current->process, handle );
         release_object( ioctl );
@@ -357,6 +366,7 @@ static struct device *create_device( struct directory *root, const struct unicod
         if (get_error() != STATUS_OBJECT_NAME_EXISTS)
         {
             /* initialize it if it didn't already exist */
+            device->ioctl_queue = NULL;
             device->manager = manager;
             list_add_tail( &manager->devices, &device->entry );
             list_init( &device->requests );
