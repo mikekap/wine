@@ -149,6 +149,23 @@ typedef struct tagMSIMEDIAINFO
     WCHAR sourcedir[MAX_PATH];
 } MSIMEDIAINFO;
 
+typedef struct tagMSITRANSFORMRECORD
+{
+    struct list entry;
+    LPWSTR table;
+    UINT mask;
+    UINT data_offset;
+} MSITRANSFORMRECORD;
+
+typedef struct tagMSITRANSFORMDATA
+{
+    MSIDATABASE *db;
+    IStorage *storage;
+    string_table *strings;
+    UINT bytes_per_strref;
+    struct list records;
+} MSITRANSFORMDATA;
+
 typedef struct tagMSIPATCHINFO
 {
     struct list entry;
@@ -694,7 +711,11 @@ extern UINT write_stream_data( IStorage *stg, LPCWSTR stname,
                                LPCVOID data, UINT sz, BOOL bTable );
 
 /* transform functions */
-extern UINT msi_table_apply_transform( MSIDATABASE *db, IStorage *stg );
+extern UINT msi_apply_transform( MSIDATABASE *db, IStorage *stg );
+extern UINT msi_begin_transform( MSIDATABASE *db, IStorage *stg, BOOL structure, MSITRANSFORMDATA **transform );
+extern UINT msi_get_transform_record( MSITRANSFORMDATA *transform, MSITRANSFORMRECORD *data, MSIVIEW *view, MSIRECORD **record );
+extern UINT msi_apply_transform_record( MSITRANSFORMDATA *transform, MSIVIEW *view, UINT mask, MSIRECORD *record );
+extern void msi_destroy_transform( MSITRANSFORMDATA *transform );
 extern UINT MSI_DatabaseApplyTransformW( MSIDATABASE *db,
                  LPCWSTR szTransformFile, int iErrorCond );
 extern void append_storage_to_db( MSIDATABASE *db, IStorage *stg );

@@ -433,7 +433,7 @@ static UINT msi_apply_substorage_transform( MSIPACKAGE *package,
     {
         ret = msi_check_transform_applicable( package, stg );
         if (ret == ERROR_SUCCESS)
-            ret = msi_table_apply_transform( package->db, stg );
+            ret = msi_apply_transform( package->db, stg );
         else
             TRACE("substorage transform %s wasn't applicable\n", debugstr_w(name));
         IStorage_Release( stg );
@@ -561,7 +561,7 @@ UINT msi_parse_patch_summary( MSISUMMARYINFO *si, MSIPATCHINFO **patch )
 
 static UINT msi_apply_patch_transform( MSIPACKAGE *package, MSIDATABASE *patch_db, IStorage *transform )
 {
-    return msi_table_apply_transform( package->db, transform );
+    return msi_apply_transform( package->db, transform );
 }
 
 UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINFO *patch )

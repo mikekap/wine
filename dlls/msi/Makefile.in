@@ -43,6 +43,7 @@ C_SRCS = \
 	suminfo.c \
 	table.c \
 	tokenize.c \
+	transform.c \
 	update.c \
 	upgrade.c \
 	where.c

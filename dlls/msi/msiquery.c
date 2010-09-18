@@ -873,7 +873,7 @@ UINT MSI_DatabaseApplyTransformW( MSIDATABASE *db,
     if( TRACE_ON( msi ) )
         enum_stream_names( stg );
 
-    ret = msi_table_apply_transform( db, stg );
+    ret = msi_apply_transform( db, stg );
 
 end:
     IStorage_Release( stg );
