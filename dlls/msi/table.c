@@ -117,6 +117,8 @@ static UINT get_tablecolumns( MSIDATABASE *db,
        LPCWSTR szTableName, MSICOLUMNINFO *colinfo, UINT *sz);
 static void msi_free_colinfo( MSICOLUMNINFO *colinfo, UINT count );
 
+static UINT TABLE_delete_row( struct tagMSIVIEW *view, UINT row );
+
 static inline UINT bytes_per_column( MSIDATABASE *db, const MSICOLUMNINFO *col )
 {
     if( MSITYPE_IS_BINARY(col->type) )
@@ -958,10 +960,13 @@ static void msi_update_table_columns( MSIDATABASE *db, LPCWSTR name )
     UINT size, offset, old_count;
     UINT n;
 
+    table = find_cached_table( db, name );
+    if (!table)
+        goto done;
+
     /* We may free name in msi_free_colinfo. */
     tablename = strdupW( name );
 
-    table = find_cached_table( db, tablename );
     old_count = table->col_count;
     msi_free_colinfo( table->colinfo, table->col_count );
     msi_free( table->colinfo );
@@ -1327,6 +1332,7 @@ static UINT TABLE_set_row( struct tagMSIVIEW *view, UINT row, MSIRECORD *rec, UI
 {
     MSITABLEVIEW *tv = (MSITABLEVIEW*)view;
     UINT i, val, r = ERROR_SUCCESS;
+    LPCWSTR table;
 
     if ( !tv->table )
         return ERROR_INVALID_PARAMETER;
@@ -1405,6 +1411,14 @@ static UINT TABLE_set_row( struct tagMSIVIEW *view, UINT row, MSIRECORD *rec, UI
         r = TABLE_set_int( tv, row, i+1, val );
         if ( r != ERROR_SUCCESS )
             break;
+    }
+
+    if (!lstrcmpW(tv->table->name, szColumns))
+    {
+        TABLE_fetch_int(&tv->view, row, 1, &val);
+        table = msi_string_lookup_id(tv->db->strings, val);
+        if (table)
+            msi_update_table_columns(tv->db, table);
     }
     return r;
 }
@@ -1647,13 +1661,18 @@ static UINT TABLE_insert_row( struct tagMSIVIEW *view, MSIRECORD *rec, UINT row,
 
     /* Re-set the persistence flag */
     tv->table->data_persistent[row] = !temporary;
-    return TABLE_set_row( view, row, rec, (1<<tv->num_cols) - 1 );
+    r = TABLE_set_row( view, row, rec, (1<<tv->num_cols) - 1 );
+    if (r != ERROR_SUCCESS)
+        TABLE_delete_row( view, row );
+
+    return r;
 }
 
 static UINT TABLE_delete_row( struct tagMSIVIEW *view, UINT row )
 {
     MSITABLEVIEW *tv = (MSITABLEVIEW*)view;
-    UINT r, num_rows, num_cols, i;
+    UINT r, num_rows, num_cols, i, val;
+    LPCWSTR table = NULL;
 
     TRACE("%p %d\n", tv, row);
 
@@ -1666,6 +1685,12 @@ static UINT TABLE_delete_row( struct tagMSIVIEW *view, UINT row )
 
     if ( row >= num_rows )
         return ERROR_FUNCTION_FAILED;
+
+    if (!lstrcmpW(tv->table->name, szColumns))
+    {
+        TABLE_fetch_int(&tv->view, row, 1, &val);
+        table = msi_string_lookup_id(tv->db->strings, val);
+    }
 
     num_rows = tv->table->row_count;
     tv->table->row_count--;
@@ -1684,6 +1709,9 @@ static UINT TABLE_delete_row( struct tagMSIVIEW *view, UINT row )
     }
 
     msi_free(tv->table->data[num_rows - 1]);
+
+    if (table)
+        msi_update_table_columns(tv->db, table);
 
     return ERROR_SUCCESS;
 }
@@ -1962,8 +1990,6 @@ static UINT TABLE_remove_column(struct tagMSIVIEW *view, LPCWSTR table, UINT num
     if (r != ERROR_SUCCESS)
         goto done;
 
-    msi_update_table_columns(tv->db, table);
-
 done:
     msiobj_release(&rec->hdr);
     columns->ops->delete(columns);
@@ -2027,8 +2053,6 @@ static UINT TABLE_add_column(struct tagMSIVIEW *view, LPCWSTR table, UINT number
     r = TABLE_insert_row(&tv->view, rec, -1, FALSE);
     if (r != ERROR_SUCCESS)
         goto done;
-
-    msi_update_table_columns(tv->db, table);
 
     if (!hold)
         goto done;
@@ -2812,9 +2836,6 @@ static UINT msi_table_load_transform( MSIDATABASE *db, IStorage *stg,
                 if (r != ERROR_SUCCESS)
                     WARN("failed to insert row %u\n", r);
             }
-
-            if (number != MSI_NULL_INTEGER && !lstrcmpW( name, szColumns ))
-                msi_update_table_columns( db, table );
 
             msiobj_release( &rec->hdr );
         }
