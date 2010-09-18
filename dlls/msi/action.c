@@ -559,9 +559,288 @@ UINT msi_parse_patch_summary( MSISUMMARYINFO *si, MSIPATCHINFO **patch )
     return r;
 }
 
-static UINT msi_apply_patch_transform( MSIPACKAGE *package, MSIDATABASE *patch_db, IStorage *transform )
+
+static UINT msi_get_col_num(MSIVIEW *view, LPCWSTR col_name, UINT *col_num)
 {
-    return msi_apply_transform( package->db, transform );
+    LPWSTR tmp_name;
+    UINT num_cols, i;
+    UINT r;
+
+    r = view->ops->get_dimensions( view, NULL, &num_cols );
+    if (r != ERROR_SUCCESS)
+        return r;
+
+    for (i = 0; i < num_cols; i++)
+    {
+        r = view->ops->get_column_info( view, i+1, &tmp_name, NULL, NULL, NULL);
+        if (r != ERROR_SUCCESS)
+            return r;
+        if (!lstrcmpiW( tmp_name, col_name ))
+        {
+            *col_num = i+1;
+            return ERROR_SUCCESS;
+        }
+        msi_free( tmp_name );
+    }
+    return ERROR_FUNCTION_FAILED;
+}
+
+struct patch_transform_data
+{
+    UINT min_sequence, max_sequence;
+    struct list diskids;
+};
+
+struct media_disk
+{
+    struct list entry;
+    UINT diskid;
+    UINT new_diskid;
+};
+
+UINT msi_apply_patch_transform(MSIPACKAGE *package, struct patch_transform_data *patch_info, IStorage *stg)
+{
+    const WCHAR szMedia[] = { 'M','e','d','i','a',0 };
+    const WCHAR szFile[] = { 'F','i','l','e',0 };
+    const WCHAR szFileName[] = { 'F','i','l','e','N','a','m','e',0 };
+    const WCHAR szPatch[] = { 'P','a','t','c','h',0 };
+    const WCHAR szPatchPackage[] = { 'P','a','t','c','h','P','a','c','k','a','g','e',0 };
+    const WCHAR szDiskID[] = { 'D','i','s','k','I','d',0 };
+    const WCHAR szSource[] = { 'S','o','u','r','c','e',0 };
+    const WCHAR szLastSequence[] = { 'L','a','s','t','S','e','q','u','e','n','c','e',0 };
+    const WCHAR szSequence[] = { 'S','e','q','u','e','n','c','e',0 };
+    const WCHAR szMedia_[] = { 'M','e','d','i','a','_',0 };
+
+    MSIDATABASE *db = package->db;
+    UINT r = ERROR_SUCCESS;
+    MSITRANSFORMDATA *transform;
+    MSITRANSFORMRECORD *trec;
+    MSIRECORD *record;
+    MSIVIEW *view;
+
+    UINT sequence_offset = 0;
+    struct media_disk *disk, *disk2;
+
+    UINT media_diskidcol = 0, patchpkg_mediacol = 0;
+    UINT media_lastseqcol = 0, file_sequencecol = 0, patch_sequencecol = 0;
+    UINT file_filenamecol = 0;
+
+    r = msi_begin_transform(db, stg, FALSE, &transform);
+    if (r != ERROR_SUCCESS)
+    {
+        ERR("Failed structure\n");
+        return r;
+    }
+
+    r = TABLE_CreateView(db, szMedia, &view);
+    if (r == ERROR_SUCCESS)
+    {
+        msi_get_col_num( view, szDiskID, &media_diskidcol );
+        msi_get_col_num( view, szLastSequence, &media_lastseqcol );
+        view->ops->delete( view );
+    }
+
+    r = TABLE_CreateView(db, szFile, &view);
+    if (r == ERROR_SUCCESS)
+    {
+        msi_get_col_num( view, szSequence, &file_sequencecol );
+        msi_get_col_num( view, szFileName, &file_filenamecol );
+        view->ops->delete( view );
+    }
+
+    r = TABLE_CreateView(db, szPatch, &view);
+    if (r == ERROR_SUCCESS)
+    {
+        msi_get_col_num( view, szSequence, &patch_sequencecol );
+        view->ops->delete( view );
+    }
+
+    r = TABLE_CreateView(db, szPatchPackage, &view);
+    if (r == ERROR_SUCCESS)
+    {
+        msi_get_col_num( view, szMedia_, &patchpkg_mediacol );
+        view->ops->delete( view );
+    }
+
+    LIST_FOR_EACH_ENTRY(trec, &transform->records, MSITRANSFORMRECORD, entry)
+    {
+        if ((lstrcmpW( trec->table, szMedia ) && lstrcmpW( trec->table, szFile )))
+            continue;
+
+        r = TABLE_CreateView(db, trec->table, &view);
+        if (r != ERROR_SUCCESS)
+            goto end;
+
+        r = msi_get_transform_record(transform, trec, view, &record);
+        if (r != ERROR_SUCCESS)
+        {
+            view->ops->delete( view );
+            goto end;
+        }
+
+        if (!lstrcmpW( trec->table, szMedia ) && media_diskidcol && trec->mask & 1)
+        {
+            UINT diskid = MSI_RecordGetInteger(record, media_diskidcol);
+            disk = msi_alloc( sizeof(*disk) );
+            disk->diskid = disk->new_diskid = diskid;
+            list_add_tail(&patch_info->diskids, &disk->entry);
+        }
+        if ( (!lstrcmpW( trec->table, szFile ) && file_sequencecol) ||
+             (!lstrcmpW( trec->table, szPatch ) && patch_sequencecol) )
+        {
+            UINT sequence = MSI_RecordGetInteger(record, !lstrcmpW( trec->table, szFile ) ? file_sequencecol : patch_sequencecol);
+            if (sequence != MSI_NULL_INTEGER)
+            {
+                patch_info->min_sequence = min(patch_info->min_sequence, sequence);
+                patch_info->max_sequence = max(patch_info->max_sequence, sequence);
+            }
+        }
+        msiobj_release( &record->hdr );
+        view->ops->delete( view );
+    }
+    if ( media_diskidcol && !list_empty(&patch_info->diskids) )
+    {
+        UINT num_rows;
+        r = TABLE_CreateView(db, szMedia, &view);
+        if (r != ERROR_SUCCESS)
+            goto end;
+        view->ops->get_dimensions(view, &num_rows, NULL);
+
+        LIST_FOR_EACH_ENTRY(disk, &patch_info->diskids, struct media_disk, entry)
+        {
+            UINT conflict = 1;
+            while (conflict)
+            {
+                conflict = 0;
+
+                MSIITERHANDLE handle = 0;
+                UINT row;
+                LIST_FOR_EACH_ENTRY(disk2, &patch_info->diskids, struct media_disk, entry)
+                {
+                    if (disk == disk2) continue;
+                    if (disk->new_diskid == disk2->new_diskid)
+                    {
+                        conflict = 1;
+                        break;
+                    }
+                }
+                if (conflict) {
+                    disk->new_diskid++;
+                    continue;
+                }
+
+                r = view->ops->find_matching_rows(view, media_diskidcol, disk->new_diskid+0x8000, &row, &handle);
+                if (r == ERROR_SUCCESS) {
+                    conflict = 1;
+                    disk->new_diskid++;
+                    continue;
+                }
+            }
+            if (disk->diskid != disk->new_diskid)
+                TRACE("Moved diskid %d to %d\n", disk->diskid, disk->new_diskid);
+        }
+
+        view->ops->delete( view );
+    }
+    if (file_sequencecol)
+    {
+        UINT num_rows, i, max_seq, seq;
+        r = TABLE_CreateView(db, szMedia, &view);
+        if (r != ERROR_SUCCESS)
+            goto end;
+
+        r = view->ops->get_dimensions(view, &num_rows, NULL);
+        if (r != ERROR_SUCCESS)
+            goto end;
+
+        max_seq = 0;
+        for (i = 0; i < num_rows; ++i)
+        {
+            r = view->ops->get_row( view, i, &record );
+            if (r != ERROR_SUCCESS)
+                goto end;
+
+            seq = MSI_RecordGetInteger(record, media_lastseqcol);
+            if (seq != MSI_NULL_INTEGER)
+                max_seq = max(max_seq, seq);
+
+            msiobj_release( &record->hdr);
+        }
+        if (max_seq >= patch_info->min_sequence)
+            sequence_offset = max_seq - patch_info->min_sequence + 1;
+        else
+            sequence_offset = 0;
+        TRACE("calculated file offsets: %d\n", sequence_offset);
+    }
+    LIST_FOR_EACH_ENTRY(trec, &transform->records, MSITRANSFORMRECORD, entry)
+    {
+        r = TABLE_CreateView(db, trec->table, &view);
+        if (r != ERROR_SUCCESS)
+            goto end;
+
+        r = msi_get_transform_record(transform, trec, view, &record);
+        if (r != ERROR_SUCCESS)
+        {
+            view->ops->delete( view );
+            goto end;
+        }
+
+        if ( (media_diskidcol && !lstrcmpW(trec->table, szMedia) && trec->mask & 1) ||
+             (patchpkg_mediacol && !lstrcmpW(trec->table, szPatchPackage) && trec->mask &1) )
+        {
+            UINT old_diskid = MSI_RecordGetInteger(record, !lstrcmpW(trec->table, szMedia) ? media_diskidcol : patchpkg_mediacol);
+            UINT new_diskid = 0;
+            LIST_FOR_EACH_ENTRY(disk, &patch_info->diskids, struct media_disk, entry)
+            {
+                if (disk->diskid == old_diskid)
+                {
+                    new_diskid = disk->new_diskid;
+                    break;
+                }
+            }
+            if (!new_diskid)
+            {
+                new_diskid = old_diskid;
+                ERR("Something went horribly wrong, looking for %d in [\n", old_diskid);
+                LIST_FOR_EACH_ENTRY(disk, &patch_info->diskids, struct media_disk, entry)
+                {
+                    ERR("%d,", disk->diskid);
+                }
+                ERR("]\n");
+            }
+            MSI_RecordSetInteger(record, !lstrcmpW(trec->table, szMedia) ? media_diskidcol : patchpkg_mediacol, new_diskid);
+        }
+        if (media_lastseqcol && !lstrcmpW(trec->table, szMedia))
+        {
+            TRACE("offsetting media lastsequence from %x to ", MSI_RecordGetInteger(record, media_lastseqcol));
+            MSI_RecordSetInteger(record, media_lastseqcol, patch_info->max_sequence+sequence_offset);
+            TRACE("%x\n", MSI_RecordGetInteger(record, media_lastseqcol));
+        }
+        if ( (file_sequencecol && !lstrcmpW(trec->table, szFile)) ||
+             (patch_sequencecol && !lstrcmpW(trec->table, szPatch)) )
+        {
+            UINT col = !lstrcmpW(trec->table, szFile) ? file_sequencecol : patch_sequencecol;
+            TRACE("Offsetting file/patched by %d - old %x, new " ,sequence_offset, MSI_RecordGetInteger(record, col));
+            MSI_RecordSetInteger(record, col, MSI_RecordGetInteger(record, col)+sequence_offset);
+            TRACE("%x (file %s)\n", MSI_RecordGetInteger(record, col), debugstr_w(MSI_RecordGetString(record, 1)));
+        }
+
+        r = msi_apply_transform_record(transform, view, trec->mask, record);
+
+        msiobj_release( &record->hdr );
+        view->ops->delete( view );
+        if (r != ERROR_SUCCESS)
+        {
+            FIXME("Failed to apply transform record\n");
+            goto end;
+        }
+    }
+
+    append_storage_to_db( db, stg );
+
+end:
+    msi_destroy_transform( transform );
+    return r;
 }
 
 UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINFO *patch )
@@ -569,17 +848,24 @@ UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINF
     UINT i, r = ERROR_SUCCESS;
     WCHAR **substorage;
     IStorage *transform;
+    struct patch_transform_data *transformdata;
+    struct media_disk *disk, *disk2;
 
     /* apply substorage transforms */
+    transformdata = msi_alloc( sizeof(*transformdata) );
+    list_init(&transformdata->diskids);
+    transformdata->max_sequence = 0;
+    transformdata->min_sequence = ~0;
+
     substorage = msi_split_string( patch->transforms, ';' );
     for (i = 0; substorage && substorage[i] && r == ERROR_SUCCESS; i++) {
-        TRACE("Applying transform %d\n", i);
         r = msi_get_substorage_transform(package, patch_db, substorage[i], &transform);
         if (r != ERROR_SUCCESS) continue;
 
         if (msi_check_transform_applicable( package, transform ) == ERROR_SUCCESS)
         {
-            r = msi_apply_patch_transform( package, patch_db, transform );
+            TRACE("Applying substorage transform file %s\n", debugstr_w(substorage[i]));
+            r = msi_apply_patch_transform( package, transformdata, transform );
             if (r != ERROR_SUCCESS)
                 WARN("Substorage transform failed to apply (%d)\n", r);
         }
@@ -587,6 +873,13 @@ UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINF
     }
 
     msi_free( substorage );
+
+    LIST_FOR_EACH_ENTRY_SAFE( disk, disk2, &transformdata->diskids, struct media_disk, entry )
+    {
+        msi_free( disk );
+    }
+    msi_free( transformdata );
+
     if (r != ERROR_SUCCESS)
         return r;
 
