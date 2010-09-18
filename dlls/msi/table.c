@@ -1152,8 +1152,6 @@ static UINT msi_stream_name( const MSITABLEVIEW *tv, UINT row, LPWSTR *pstname )
             lstrcatW( stname, szDot );
             lstrcatW( stname, sval );
         }
-        else
-           continue;
     }
 
     *pstname = stname;
@@ -1552,8 +1550,6 @@ static UINT TABLE_get_column_info( struct tagMSIVIEW *view,
     return ERROR_SUCCESS;
 }
 
-static UINT msi_table_find_row( MSITABLEVIEW *tv, MSIRECORD *rec, UINT *row );
-
 static UINT table_validate_new( MSITABLEVIEW *tv, MSIRECORD *rec )
 {
     UINT r, row, i;
@@ -1585,7 +1581,7 @@ static UINT table_validate_new( MSITABLEVIEW *tv, MSIRECORD *rec )
     }
 
     /* check there's no duplicate keys */
-    r = msi_table_find_row( tv, rec, &row );
+    r = msi_view_find_row( tv->db, (MSIVIEW *) tv, rec, &row );
     if (r == ERROR_SUCCESS)
         return ERROR_FUNCTION_FAILED;
 
@@ -1728,7 +1724,7 @@ static UINT msi_table_update(struct tagMSIVIEW *view, MSIRECORD *rec, UINT row)
     if (!tv->table)
         return ERROR_INVALID_PARAMETER;
 
-    r = msi_table_find_row(tv, rec, &new_row);
+    r = msi_view_find_row(tv->db, (MSIVIEW *) tv, rec, &new_row);
     if (r != ERROR_SUCCESS)
     {
         ERR("can't find row to modify\n");
@@ -1750,7 +1746,7 @@ static UINT msi_table_assign(struct tagMSIVIEW *view, MSIRECORD *rec)
     if (!tv->table)
         return ERROR_INVALID_PARAMETER;
 
-    r = msi_table_find_row(tv, rec, &row);
+    r = msi_view_find_row(tv->db, (MSIVIEW *) tv, rec, &row);
     if (r == ERROR_SUCCESS)
         return TABLE_set_row(view, row, rec, (1 << tv->num_cols) - 1);
     else
@@ -1762,7 +1758,7 @@ static UINT modify_delete_row( struct tagMSIVIEW *view, MSIRECORD *rec )
     MSITABLEVIEW *tv = (MSITABLEVIEW *)view;
     UINT row, r;
 
-    r = msi_table_find_row(tv, rec, &row);
+    r = msi_view_find_row(tv->db, (MSIVIEW *) tv, rec, &row);
     if (r != ERROR_SUCCESS)
         return r;
 
@@ -1982,7 +1978,7 @@ static UINT TABLE_remove_column(struct tagMSIVIEW *view, LPCWSTR table, UINT num
     if (r != ERROR_SUCCESS)
         return r;
 
-    r = msi_table_find_row((MSITABLEVIEW *)columns, rec, &row);
+    r = msi_view_find_row(tv->db, columns, rec, &row);
     if (r != ERROR_SUCCESS)
         goto done;
 
@@ -2255,7 +2251,7 @@ static UINT TABLE_drop(struct tagMSIVIEW *view)
     if (r != ERROR_SUCCESS)
         return r;
 
-    r = msi_table_find_row((MSITABLEVIEW *)tables, rec, &row);
+    r = msi_view_find_row(tv->db, tables, rec, &row);
     if (r != ERROR_SUCCESS)
         goto done;
 
@@ -2577,99 +2573,6 @@ static void dump_table( const string_table *st, const USHORT *rawdata, UINT raws
     }
 }
 
-static UINT* msi_record_to_row( const MSITABLEVIEW *tv, MSIRECORD *rec )
-{
-    LPCWSTR str;
-    UINT i, r, *data;
-
-    data = msi_alloc( tv->num_cols *sizeof (UINT) );
-    for( i=0; i<tv->num_cols; i++ )
-    {
-        data[i] = 0;
-
-        if ( ~tv->columns[i].type & MSITYPE_KEY )
-            continue;
-
-        /* turn the transform column value into a row value */
-        if ( ( tv->columns[i].type & MSITYPE_STRING ) &&
-             ! MSITYPE_IS_BINARY(tv->columns[i].type) )
-        {
-            str = MSI_RecordGetString( rec, i+1 );
-            r = msi_string2idW( tv->db->strings, str, &data[i] );
-
-            /* if there's no matching string in the string table,
-               these keys can't match any record, so fail now. */
-            if( ERROR_SUCCESS != r )
-            {
-                msi_free( data );
-                return NULL;
-            }
-        }
-        else
-        {
-            data[i] = MSI_RecordGetInteger( rec, i+1 );
-
-            if (data[i] == MSI_NULL_INTEGER)
-                data[i] = 0;
-            else if ((tv->columns[i].type&0xff) == 2)
-                data[i] += 0x8000;
-            else
-                data[i] += 0x80000000;
-        }
-    }
-    return data;
-}
-
-static UINT msi_row_matches( MSITABLEVIEW *tv, UINT row, const UINT *data )
-{
-    UINT i, r, x, ret = ERROR_FUNCTION_FAILED;
-
-    for( i=0; i<tv->num_cols; i++ )
-    {
-        if ( ~tv->columns[i].type & MSITYPE_KEY )
-            continue;
-
-        /* turn the transform column value into a row value */
-        r = TABLE_fetch_int( &tv->view, row, i+1, &x );
-        if ( r != ERROR_SUCCESS )
-        {
-            ERR("TABLE_fetch_int shouldn't fail here\n");
-            break;
-        }
-
-        /* if this key matches, move to the next column */
-        if ( x != data[i] )
-        {
-            ret = ERROR_FUNCTION_FAILED;
-            break;
-        }
-
-        ret = ERROR_SUCCESS;
-    }
-
-    return ret;
-}
-
-static UINT msi_table_find_row( MSITABLEVIEW *tv, MSIRECORD *rec, UINT *row )
-{
-    UINT i, r = ERROR_FUNCTION_FAILED, *data;
-
-    data = msi_record_to_row( tv, rec );
-    if( !data )
-        return r;
-    for( i = 0; i < tv->table->row_count; i++ )
-    {
-        r = msi_row_matches( tv, i, data );
-        if( r == ERROR_SUCCESS )
-        {
-            *row = i;
-            break;
-        }
-    }
-    msi_free( data );
-    return r;
-}
-
 typedef struct
 {
     struct list entry;
@@ -2804,7 +2707,7 @@ static UINT msi_table_load_transform( MSIDATABASE *db, IStorage *stg,
 
             if (TRACE_ON(msidb)) dump_record( rec );
 
-            r = msi_table_find_row( tv, rec, &row );
+            r = msi_view_find_row( tv->db, (MSIVIEW*) tv, rec, &row );
             if (r == ERROR_SUCCESS)
             {
                 if (!mask)

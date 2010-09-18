@@ -367,6 +367,131 @@ UINT msi_view_get_row(MSIDATABASE *db, MSIVIEW *view, UINT row, MSIRECORD **rec)
     return ERROR_SUCCESS;
 }
 
+static UINT* msi_record_to_row( MSIDATABASE *db, MSIVIEW *tv, MSIRECORD *rec )
+{
+    LPCWSTR str;
+    UINT i, r, *data;
+    UINT num_cols;
+    UINT col_type;
+
+    r = tv->ops->get_dimensions( tv, NULL, &num_cols );
+    if (r != ERROR_SUCCESS)
+        return NULL;
+
+    data = msi_alloc( num_cols *sizeof (UINT) );
+    if (!data)
+        return NULL;
+    for( i=0; i<num_cols; i++ )
+    {
+        data[i] = 0;
+
+        r = tv->ops->get_column_info( tv, i+1, NULL, &col_type, NULL, NULL );
+        if (r != ERROR_SUCCESS)
+        {
+            msi_free( data );
+            return NULL;
+        }
+
+        if ( ~col_type & MSITYPE_KEY )
+            continue;
+
+        /* turn the transform column value into a row value */
+        if ( ( col_type & MSITYPE_STRING ) &&
+             ! MSITYPE_IS_BINARY(col_type) )
+        {
+            str = MSI_RecordGetString( rec, i+1 );
+            r = msi_string2idW( db->strings, str, &data[i] );
+
+            /* if there's no matching string in the string table,
+               these keys can't match any record, so fail now. */
+            if( ERROR_SUCCESS != r )
+            {
+                msi_free( data );
+                return NULL;
+            }
+        }
+        else
+        {
+            data[i] = MSI_RecordGetInteger( rec, i+1 );
+
+            if (data[i] == MSI_NULL_INTEGER)
+                data[i] = 0;
+            else if ((col_type&0xff) == 2)
+                data[i] += 0x8000;
+            else
+                data[i] += 0x80000000;
+        }
+    }
+    return data;
+}
+
+static UINT msi_row_matches( MSIVIEW *tv, UINT row, const UINT *data )
+{
+    UINT i, r, x, ret = ERROR_FUNCTION_FAILED;
+    UINT num_cols;
+    UINT col_type;
+
+    r = tv->ops->get_dimensions( tv, NULL, &num_cols );
+    if (r != ERROR_SUCCESS)
+        return r;
+
+    for( i=0; i<num_cols; i++ )
+    {
+        r = tv->ops->get_column_info( tv, i+1, NULL, &col_type, NULL, NULL );
+        if (r != ERROR_SUCCESS)
+            return r;
+
+        if ( ~col_type & MSITYPE_KEY )
+            continue;
+
+        /* turn the transform column value into a row value */
+        r = tv->ops->fetch_int( tv, row, i+1, &x );
+        if ( r != ERROR_SUCCESS )
+        {
+            ERR("TABLE_fetch_int shouldn't fail here\n");
+            break;
+        }
+
+        /* if this key matches, move to the next column */
+        if ( x != data[i] )
+        {
+            ret = ERROR_FUNCTION_FAILED;
+            break;
+        }
+
+        ret = ERROR_SUCCESS;
+    }
+
+    return ret;
+}
+
+UINT msi_view_find_row( MSIDATABASE *db, MSIVIEW *tv, MSIRECORD *rec, UINT *row )
+{
+    UINT i, r, *data;
+    UINT num_rows;
+
+    r = tv->ops->get_dimensions( tv, &num_rows, NULL );
+    if (r != ERROR_SUCCESS)
+        return r;
+
+    r = ERROR_FUNCTION_FAILED;
+    data = msi_record_to_row( db, tv, rec );
+    if( !data )
+        return r;
+
+    for( i = 0; i < num_rows; i++ )
+    {
+        r = msi_row_matches( tv, i, data );
+        if( r == ERROR_SUCCESS )
+        {
+            *row = i;
+            break;
+        }
+    }
+    msi_free( data );
+    return r;
+}
+
 UINT MSI_ViewFetch(MSIQUERY *query, MSIRECORD **prec)
 {
     MSIVIEW *view;

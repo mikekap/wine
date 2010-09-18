@@ -760,6 +760,7 @@ extern UINT MSI_ViewGetColumnInfo(MSIQUERY *, MSICOLINFO, MSIRECORD **);
 extern UINT MSI_ViewModify( MSIQUERY *, MSIMODIFY, MSIRECORD * );
 extern UINT VIEW_find_column( MSIVIEW *, LPCWSTR, LPCWSTR, UINT * );
 extern UINT msi_view_get_row(MSIDATABASE *, MSIVIEW *, UINT, MSIRECORD **);
+extern UINT msi_view_find_row(MSIDATABASE *, MSIVIEW *, MSIRECORD *, UINT *);
 
 /* install internals */
 extern UINT MSI_SetInstallLevel( MSIPACKAGE *package, int iInstallLevel );
