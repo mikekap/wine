@@ -397,11 +397,9 @@ end:
     return ret;
 }
 
-static UINT msi_apply_substorage_transform( MSIPACKAGE *package,
-                                 MSIDATABASE *patch_db, LPCWSTR name )
+static UINT msi_get_substorage_transform( MSIPACKAGE *package, MSIDATABASE *patch_db,
+                                          LPCWSTR name, IStorage **transform )
 {
-    UINT ret = ERROR_FUNCTION_FAILED;
-    IStorage *stg = NULL;
     HRESULT r;
 
     TRACE("%p %s\n", package, debugstr_w(name) );
@@ -412,20 +410,36 @@ static UINT msi_apply_substorage_transform( MSIPACKAGE *package,
         return ERROR_FUNCTION_FAILED;
     }
 
-    r = IStorage_OpenStorage( patch_db->storage, name, NULL, STGM_SHARE_EXCLUSIVE, NULL, 0, &stg );
-    if (SUCCEEDED(r))
+    r = IStorage_OpenStorage( patch_db->storage, name, NULL, STGM_SHARE_EXCLUSIVE, NULL, 0, transform );
+    if (FAILED(r))
+    {
+        ERR("failed to open substorage %s\n", debugstr_w(name));
+        return ERROR_FUNCTION_FAILED;
+    }
+
+    return ERROR_SUCCESS;
+}
+
+static UINT msi_apply_substorage_transform( MSIPACKAGE *package,
+                                            MSIDATABASE *patch_db, LPCWSTR name )
+{
+    UINT ret;
+    IStorage *stg = NULL;
+
+    TRACE("%p %s\n", package, debugstr_w(name) );
+
+    ret = msi_get_substorage_transform(package, patch_db, name, &stg);
+    if (ret == ERROR_SUCCESS)
     {
         ret = msi_check_transform_applicable( package, stg );
         if (ret == ERROR_SUCCESS)
-            msi_table_apply_transform( package->db, stg );
+            ret = msi_table_apply_transform( package->db, stg );
         else
             TRACE("substorage transform %s wasn't applicable\n", debugstr_w(name));
         IStorage_Release( stg );
     }
-    else
-        ERR("failed to open substorage %s\n", debugstr_w(name));
 
-    return ERROR_SUCCESS;
+    return ret;
 }
 
 UINT msi_check_patch_applicable( MSIPACKAGE *package, MSISUMMARYINFO *si )
@@ -545,15 +559,32 @@ UINT msi_parse_patch_summary( MSISUMMARYINFO *si, MSIPATCHINFO **patch )
     return r;
 }
 
+static UINT msi_apply_patch_transform( MSIPACKAGE *package, MSIDATABASE *patch_db, IStorage *transform )
+{
+    return msi_table_apply_transform( package->db, transform );
+}
+
 UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINFO *patch )
 {
     UINT i, r = ERROR_SUCCESS;
     WCHAR **substorage;
+    IStorage *transform;
 
     /* apply substorage transforms */
     substorage = msi_split_string( patch->transforms, ';' );
-    for (i = 0; substorage && substorage[i] && r == ERROR_SUCCESS; i++)
-        r = msi_apply_substorage_transform( package, patch_db, substorage[i] );
+    for (i = 0; substorage && substorage[i] && r == ERROR_SUCCESS; i++) {
+        TRACE("Applying transform %d\n", i);
+        r = msi_get_substorage_transform(package, patch_db, substorage[i], &transform);
+        if (r != ERROR_SUCCESS) continue;
+
+        if (msi_check_transform_applicable( package, transform ) == ERROR_SUCCESS)
+        {
+            r = msi_apply_patch_transform( package, patch_db, transform );
+            if (r != ERROR_SUCCESS)
+                WARN("Substorage transform failed to apply (%d)\n", r);
+        }
+        IStorage_Release( transform );
+    }
 
     msi_free( substorage );
     if (r != ERROR_SUCCESS)
