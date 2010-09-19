@@ -172,6 +172,7 @@ typedef struct tagMSIPATCHINFO
     LPWSTR patchcode;
     LPWSTR transforms;
     LPWSTR localfile;
+    IStorage *storage;
     MSIPATCHSTATE state;
 } MSIPATCHINFO;
 

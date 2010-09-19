@@ -200,8 +200,9 @@ static LONG CDECL cabinet_seek(INT_PTR hf, LONG dist, int seektype)
 
 struct cab_stream
 {
-    MSIDATABASE *db;
-    WCHAR       *name;
+    MSIPACKAGE   *package;
+    WCHAR        *name;
+    MSIMEDIAINFO *media;
 };
 
 static struct cab_stream cab_stream;
@@ -210,11 +211,25 @@ static INT_PTR CDECL cabinet_open_stream( char *pszFile, int oflag, int pmode )
 {
     UINT r;
     IStream *stm;
+    MSIPATCHINFO *pi;
 
     if (oflag)
         WARN("ignoring open flags 0x%08x\n", oflag);
 
-    r = db_get_raw_stream( cab_stream.db, cab_stream.name, &stm );
+    LIST_FOR_EACH_ENTRY(pi, &cab_stream.package->patches, MSIPATCHINFO, entry)
+    {
+        if (!strcmpW(pi->localfile, cab_stream.media->sourcedir))
+        {
+            r = IStorage_OpenStream( pi->storage, cab_stream.name, NULL,
+                             STGM_READ | STGM_SHARE_EXCLUSIVE, 0, &stm );
+            if (SUCCEEDED(r))
+                return (INT_PTR) stm;
+            WARN("Failed to open named stream\n");
+            return 0;
+        }
+    }
+
+    r = db_get_raw_stream( cab_stream.package->db, cab_stream.name, &stm );
     if (r != ERROR_SUCCESS)
     {
         WARN("Failed to get cabinet stream %u\n", r);
@@ -606,8 +621,9 @@ static BOOL extract_cabinet_stream( MSIPACKAGE *package, MSIMEDIAINFO *mi, LPVOI
         return FALSE;
     }
 
-    cab_stream.db = package->db;
+    cab_stream.package = package;
     cab_stream.name = encode_streamname( FALSE, mi->cabinet + 1 );
+    cab_stream.media = mi;
     if (!cab_stream.name)
         goto done;
 
@@ -688,13 +704,15 @@ static UINT msi_load_media_info(MSIPACKAGE *package, MSIFILE *file, MSIMEDIAINFO
     mi->cabinet = strdupW(MSI_RecordGetString(row, 4));
     msi_free(mi->volume_label);
     mi->volume_label = strdupW(MSI_RecordGetString(row, 5));
+    source_dir = strdupW(MSI_RecordGetString(row, 6));
     msiobj_release(&row->hdr);
 
     if (!mi->first_volume)
         mi->first_volume = strdupW(mi->volume_label);
 
     msi_set_sourcedir_props(package, FALSE);
-    source_dir = msi_dup_property(package->db, cszSourceDir);
+    if (!source_dir || !source_dir[0] || !lstrcmpW(source_dir, cszSourceDir))
+        source_dir = msi_dup_property(package->db, cszSourceDir);
     lstrcpyW(mi->sourcedir, source_dir);
     mi->type = get_drive_type(source_dir);
 

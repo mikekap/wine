@@ -887,8 +887,8 @@ uninstall:
     ok( !delete_pf( "msitest", FALSE ), "directory not removed\n" );
 
 cleanup:
-    DeleteFileA( msifile );
-    DeleteFileA( mspfile );
+    //DeleteFileA( msifile );
+    //DeleteFileA( mspfile );
     DeleteFileA( "msitest\\patch.txt" );
     RemoveDirectoryA( "msitest" );
 }

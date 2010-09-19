@@ -469,43 +469,6 @@ UINT msi_check_patch_applicable( MSIPACKAGE *package, MSISUMMARYINFO *si )
     return ret;
 }
 
-static UINT msi_set_media_source_prop(MSIPACKAGE *package)
-{
-    MSIQUERY *view;
-    MSIRECORD *rec = NULL;
-    LPWSTR patch;
-    LPCWSTR prop;
-    UINT r;
-
-    static const WCHAR query[] = {'S','E','L','E','C','T',' ',
-        '`','S','o','u','r','c','e','`',' ','F','R','O','M',' ',
-        '`','M','e','d','i','a','`',' ','W','H','E','R','E',' ',
-        '`','S','o','u','r','c','e','`',' ','I','S',' ',
-        'N','O','T',' ','N','U','L','L',0};
-
-    r = MSI_DatabaseOpenViewW(package->db, query, &view);
-    if (r != ERROR_SUCCESS)
-        return r;
-
-    r = MSI_ViewExecute(view, 0);
-    if (r != ERROR_SUCCESS)
-        goto done;
-
-    if (MSI_ViewFetch(view, &rec) == ERROR_SUCCESS)
-    {
-        prop = MSI_RecordGetString(rec, 1);
-        patch = msi_dup_property(package->db, szPatch);
-        msi_set_property(package->db, prop, patch);
-        msi_free(patch);
-    }
-
-done:
-    if (rec) msiobj_release(&rec->hdr);
-    msiobj_release(&view->hdr);
-
-    return r;
-}
-
 UINT msi_parse_patch_summary( MSISUMMARYINFO *si, MSIPATCHINFO **patch )
 {
     MSIPATCHINFO *pi;
@@ -605,6 +568,7 @@ UINT msi_apply_patch_transform(MSIPACKAGE *package, struct patch_transform_data 
     const WCHAR szFileName[] = { 'F','i','l','e','N','a','m','e',0 };
     const WCHAR szPatch[] = { 'P','a','t','c','h',0 };
     const WCHAR szPatchPackage[] = { 'P','a','t','c','h','P','a','c','k','a','g','e',0 };
+    const WCHAR szPatchMediaSrc[] = { 'P','a','t','c','h','M','e','d','i','a','S','r','c',0 };
     const WCHAR szDiskID[] = { 'D','i','s','k','I','d',0 };
     const WCHAR szSource[] = { 'S','o','u','r','c','e',0 };
     const WCHAR szLastSequence[] = { 'L','a','s','t','S','e','q','u','e','n','c','e',0 };
@@ -621,6 +585,7 @@ UINT msi_apply_patch_transform(MSIPACKAGE *package, struct patch_transform_data 
     UINT sequence_offset = 0;
     struct media_disk *disk, *disk2;
 
+    UINT media_sourcecol = 0;
     UINT media_diskidcol = 0, patchpkg_mediacol = 0;
     UINT media_lastseqcol = 0, file_sequencecol = 0, patch_sequencecol = 0;
     UINT file_filenamecol = 0;
@@ -637,6 +602,7 @@ UINT msi_apply_patch_transform(MSIPACKAGE *package, struct patch_transform_data 
     {
         msi_get_col_num( view, szDiskID, &media_diskidcol );
         msi_get_col_num( view, szLastSequence, &media_lastseqcol );
+        msi_get_col_num( view, szSource, &media_sourcecol );
         view->ops->delete( view );
     }
 
@@ -816,6 +782,14 @@ UINT msi_apply_patch_transform(MSIPACKAGE *package, struct patch_transform_data 
             MSI_RecordSetInteger(record, media_lastseqcol, patch_info->max_sequence+sequence_offset);
             TRACE("%x\n", MSI_RecordGetInteger(record, media_lastseqcol));
         }
+        if (media_sourcecol && !lstrcmpW(trec->table, szMedia))
+        {
+            LPCWSTR old_media = MSI_RecordGetString(record, media_sourcecol);
+            LPWSTR media = msi_dup_property(package->db, szPatchMediaSrc);
+            TRACE("Set mediasrc from %s to %s\n", debugstr_w(old_media), debugstr_w(media));
+            MSI_RecordSetStringW(record, media_sourcecol, media);
+            msi_free( media );
+        }
         if ( (file_sequencecol && !lstrcmpW(trec->table, szFile)) ||
              (patch_sequencecol && !lstrcmpW(trec->table, szPatch)) )
         {
@@ -845,11 +819,15 @@ end:
 
 UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINFO *patch )
 {
+    const WCHAR szPatchMediaSrc[] = { 'P','a','t','c','h','M','e','d','i','a','S','r','c',0 };
+
     UINT i, r = ERROR_SUCCESS;
     WCHAR **substorage;
     IStorage *transform;
     struct patch_transform_data *transformdata;
     struct media_disk *disk, *disk2;
+
+    msi_set_property(package->db, szPatchMediaSrc, patch->localfile);
 
     /* apply substorage transforms */
     transformdata = msi_alloc( sizeof(*transformdata) );
@@ -871,7 +849,6 @@ UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINF
         }
         IStorage_Release( transform );
     }
-
     msi_free( substorage );
 
     LIST_FOR_EACH_ENTRY_SAFE( disk, disk2, &transformdata->diskids, struct media_disk, entry )
@@ -882,14 +859,9 @@ UINT msi_apply_patch_db( MSIPACKAGE *package, MSIDATABASE *patch_db, MSIPATCHINF
 
     if (r != ERROR_SUCCESS)
         return r;
-
-    msi_set_media_source_prop( package );
-
-    /*
-     * There might be a CAB file in the patch package,
-     * so append it to the list of storages to search for streams.
-     */
-    append_storage_to_db( package->db, patch_db->storage );
+    
+    patch->storage = patch_db->storage;
+    IStorage_AddRef(patch->storage);
 
     patch->state = MSIPATCHSTATE_APPLIED;
     list_add_tail( &package->patches, &patch->entry );

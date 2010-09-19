@@ -269,6 +269,7 @@ static void free_package_structures( MSIPACKAGE *package )
         MSIPATCHINFO *patch = LIST_ENTRY( item, MSIPATCHINFO, entry );
 
         list_remove( &patch->entry );
+        IStorage_Release( patch->storage );
         msi_free( patch->patchcode );
         msi_free( patch->transforms );
         msi_free( patch->localfile );
