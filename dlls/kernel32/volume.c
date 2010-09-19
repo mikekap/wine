@@ -613,7 +613,7 @@ fill_fs_info:  /* now fill in the information that depends on the file system ty
         if (flags) *flags = FILE_CASE_PRESERVED_NAMES;  /* FIXME */
         break;
     default:
-        if (fsname) lstrcpynW( fsname, ntfsW, fsname_len );
+        if (fsname) lstrcpynW( fsname, fat32W, fsname_len );
         if (filename_len) *filename_len = 255;
         if (flags) *flags = FILE_CASE_PRESERVED_NAMES;
         break;
