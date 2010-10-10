@@ -107,6 +107,7 @@ struct sock
     obj_handle_t        wparam;      /* message wparam (socket handle) */
     int                 errors[FD_MAX_EVENTS]; /* event errors */
     struct sock        *deferred;    /* socket that waits for a deferred accept */
+    int                 shutdown;    /* pending shutdown flags */
     struct async_queue *read_q;      /* queue for asynchronous reads */
     struct async_queue *write_q;     /* queue for asynchronous writes */
 };
@@ -254,6 +255,37 @@ static int sock_reselect( struct sock *sock )
     /* update condition mask */
     set_fd_events( sock->fd, ev );
     return ev;
+}
+
+static void sock_try_async_shutdown( struct sock* sock )
+{
+    int fd;
+    int shut_read = 0, shut_write = 0;
+
+    if (sock->shutdown == -1)
+        return;
+
+    fd = get_unix_fd(sock->fd);
+    if ( (sock->shutdown == SHUT_RD || sock->shutdown == SHUT_RDWR) && !async_queued( sock->read_q ) )
+    {
+        shutdown( fd, SHUT_RD );
+        sock->state &= ~(FD_READ|FD_WINE_LISTENING);
+        shut_read = 1;
+    }
+    if ( (sock->shutdown == SHUT_WR || sock->shutdown == SHUT_RDWR) && !async_queued( sock->write_q ) )
+    {
+        shutdown( fd, SHUT_WR );
+        sock->state &= ~FD_WRITE;
+        shut_write = 1;
+    }
+
+    if ( sock->shutdown == SHUT_RDWR && shut_read )
+        sock->shutdown = SHUT_WR;
+    if ( sock->shutdown == SHUT_RDWR && shut_write )
+        sock->shutdown = SHUT_RD;
+
+    if ( (sock->shutdown == SHUT_RD && shut_read) || (sock->shutdown == SHUT_WR && shut_write) )
+        sock->shutdown = -1;
 }
 
 /* wake anybody waiting on the socket event or send the associated message */
@@ -525,6 +557,7 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int type,
     struct sock *sock = get_fd_user( fd );
     struct async *async;
     struct async_queue *queue;
+    int sock_readable, sock_writable;
 
     assert( sock->obj.ops == &sock_ops );
 
@@ -543,8 +576,13 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int type,
         return;
     }
 
-    if ( ( !( sock->state & (FD_READ|FD_CONNECT|FD_WINE_LISTENING) ) && type == ASYNC_TYPE_READ  ) ||
-         ( !( sock->state & (FD_WRITE|FD_CONNECT) ) && type == ASYNC_TYPE_WRITE ) )
+    sock_readable = sock->state & (FD_READ|FD_CONNECT|FD_WINE_LISTENING) &&
+                    !(sock->shutdown == SHUT_RD || sock->shutdown == SHUT_RDWR);
+    sock_writable = sock->state & (FD_WRITE|FD_CONNECT) &&
+                    !(sock->shutdown == SHUT_WR || sock->shutdown == SHUT_RDWR);
+
+    if ( ( !sock_readable && type == ASYNC_TYPE_READ  ) ||
+         ( !sock_writable && type == ASYNC_TYPE_WRITE ) )
     {
         set_error( STATUS_PIPE_DISCONNECTED );
         return;
@@ -561,6 +599,8 @@ static void sock_queue_async( struct fd *fd, const async_data_t *data, int type,
 static void sock_reselect_async( struct fd *fd, struct async_queue *queue )
 {
     struct sock *sock = get_fd_user( fd );
+    sock_try_async_shutdown( sock );
+
     sock_reselect( sock );
 }
 
@@ -618,6 +658,7 @@ static void init_sock(struct sock *sock)
     sock->message = 0;
     sock->wparam  = 0;
     sock->deferred = NULL;
+    sock->shutdown = -1;
     sock->read_q  = NULL;
     sock->write_q = NULL;
     memset( sock->errors, 0, sizeof(sock->errors) );
@@ -1075,5 +1116,20 @@ DECL_HANDLER(set_socket_deferred)
         return;
     }
     sock->deferred = acceptsock;
+    release_object( sock );
+}
+
+DECL_HANDLER(register_async_shutdown)
+{
+    struct sock *sock;
+
+    sock = (struct sock *) get_handle_obj( current->process, req->handle, FILE_WRITE_ATTRIBUTES, &sock_ops );
+    if ( !sock )
+        return;
+
+    sock->shutdown = req->how;
+    sock_try_async_shutdown( sock );
+
+    sock_reselect( sock );
     release_object( sock );
 }

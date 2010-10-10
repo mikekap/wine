@@ -1134,6 +1134,14 @@ enum server_fd_type
     obj_handle_t deferred;      /* handle to the socket for which accept() is deferred */
 @END
 
+
+/* Register an async shutdown */
+@REQ(register_async_shutdown)
+    obj_handle_t handle;        /* handle to the socket */
+    unsigned int how;           /* SHUT_* flags */
+@END
+
+
 /* Allocate a console (only used by a console renderer) */
 @REQ(alloc_console)
     unsigned int access;        /* wanted access rights */
