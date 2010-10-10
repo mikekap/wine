@@ -3856,7 +3856,7 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     unsigned int i, options;
     int n, fd, err;
     struct ws2_async *wsa;
-    int totalLength = 0;
+    int total_length = 0, bytes_sent = 0;
     ULONG_PTR cvalue = (lpOverlapped && ((ULONG_PTR)lpOverlapped->hEvent & 1) == 0) ? (ULONG_PTR)lpOverlapped : 0;
 
     TRACE("socket %04lx, wsabuf %p, nbufs %d, flags %d, to %p, tolen %d, ovl %p, func %p\n",
@@ -3886,13 +3886,7 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     {
         wsa->iovec[i].iov_base = lpBuffers[i].buf;
         wsa->iovec[i].iov_len  = lpBuffers[i].len;
-        totalLength += lpBuffers[i].len;
-    }
-
-    if (!lpNumberOfBytesSent)
-    {
-        err = WSAEFAULT;
-        goto error;
+        total_length += lpBuffers[i].len;
     }
 
     for (;;)
@@ -3908,6 +3902,9 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         goto error;
     }
 
+    if (n >= 0)
+        bytes_sent += n;
+
     if ((lpOverlapped || lpCompletionRoutine) &&
         !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
     {
@@ -3920,7 +3917,7 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         if (n == -1 || n < totalLength)
         {
             iosb->u.Status = STATUS_PENDING;
-            iosb->Information = n == -1 ? 0 : n;
+            iosb->Information = bytes_sent;
 
             SERVER_START_REQ( register_async )
             {
@@ -3945,8 +3942,8 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         }
 
         iosb->u.Status = STATUS_SUCCESS;
-        iosb->Information = n;
-        *lpNumberOfBytesSent = n;
+        iosb->Information = bytes_sent;
+        if (lpNumberOfBytesSent) *lpNumberOfBytesSent = bytes_sent;
         if (!wsa->completion_func)
         {
             if (cvalue) WS_AddCompletion( s, cvalue, STATUS_SUCCESS, n );
@@ -3965,7 +3962,7 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
          * sending blocks until the entire buffer is sent. */
         DWORD timeout_start = GetTickCount();
 
-        *lpNumberOfBytesSent = n == -1 ? 0 : n;
+        bytes_sent = n == -1 ? 0 : n;
 
         while (wsa->first_iovec < wsa->n_iovecs)
         {
@@ -3995,25 +3992,25 @@ static int WS2_sendto( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
             }
 
             if (n >= 0)
-                *lpNumberOfBytesSent += n;
+                bytes_sent += n;
         }
     }
     else  /* non-blocking */
     {
-        if (n < totalLength)
+        if (bytes_sent < total_length)
             _enable_event(SOCKET2HANDLE(s), FD_WRITE, 0, 0);
         if (n == -1)
         {
             err = WSAEWOULDBLOCK;
             goto error;
         }
-        *lpNumberOfBytesSent = n;
     }
 
-    TRACE(" -> %i bytes\n", *lpNumberOfBytesSent);
+    TRACE(" -> %i bytes\n", bytes_sent);
 
     HeapFree( GetProcessHeap(), 0, wsa );
     release_sock_fd( s, fd );
+    if (lpNumberOfBytesSent) *lpNumberOfBytesSent = bytes_sent;
     WSASetLastError(0);
     return 0;
 
@@ -4021,6 +4018,7 @@ error:
     HeapFree( GetProcessHeap(), 0, wsa );
     release_sock_fd( s, fd );
     WARN(" -> ERROR %d\n", err);
+    if (lpNumberOfBytesSent) *lpNumberOfBytesSent = bytes_sent;
     WSASetLastError(err);
     return SOCKET_ERROR;
 }
@@ -5666,10 +5664,11 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     int n, fd, err;
     struct ws2_async *wsa;
     DWORD timeout_start = GetTickCount();
+    DWORD bytes_recvd = 0;
     ULONG_PTR cvalue = (lpOverlapped && ((ULONG_PTR)lpOverlapped->hEvent & 1) == 0) ? (ULONG_PTR)lpOverlapped : 0;
 
     TRACE("socket %04lx, wsabuf %p, nbufs %d, flags %d, from %p, fromlen %d, ovl %p, func %p\n",
-          s, lpBuffers, dwBufferCount, *lpFlags, lpFrom,
+          s, lpBuffers, dwBufferCount, lpFlags ? *lpFlags : 0, lpFrom,
           (lpFromlen ? *lpFromlen : -1),
           lpOverlapped, lpCompletionRoutine);
 
@@ -5685,8 +5684,8 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
     }
 
     wsa->hSocket     = SOCKET2HANDLE(s);
-    wsa->flags       = *lpFlags;
-    wsa->lpFlags     = lpFlags;
+    wsa->flags       = lpFlags ? *lpFlags : 0;
+    wsa->lpFlags     = lpFlags ? lpFlags : &wsa->flags;
     wsa->addr        = lpFrom;
     wsa->addrlen.ptr = lpFromlen;
     wsa->control     = lpControlBuffer;
@@ -5704,6 +5703,8 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         wsa->iovec[i].iov_len  = lpBuffers[i].len;
     }
 
+    bytes_recvd = 0;
+
     for (;;)
     {
         n = WS2_recv( fd, wsa );
@@ -5719,7 +5720,7 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
             }
         }
         else
-            *lpNumberOfBytesRecvd = n;
+            bytes_recvd += n;
 
         if ((lpOverlapped || lpCompletionRoutine) &&
              !(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
@@ -5754,7 +5755,8 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
             }
 
             iosb->u.Status = STATUS_SUCCESS;
-            iosb->Information = n;
+            iosb->Information = bytes_recvd;
+            if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = bytes_recvd;
             if (!wsa->completion_func)
             {
                 if (cvalue) WS_AddCompletion( s, cvalue, STATUS_SUCCESS, n );
@@ -5781,7 +5783,7 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
 
             pfd.fd = fd;
             pfd.events = POLLIN;
-            if (*lpFlags & WS_MSG_OOB) pfd.events |= POLLPRI;
+            if (wsa->flags & WS_MSG_OOB) pfd.events |= POLLPRI;
 
             if (!timeout || !poll( &pfd, 1, timeout ))
             {
@@ -5799,9 +5801,10 @@ static int WS2_recv_base( SOCKET s, LPWSABUF lpBuffers, DWORD dwBufferCount,
         }
     }
 
-    TRACE(" -> %i bytes\n", n);
+    TRACE(" -> %i bytes\n", bytes_recvd);
     HeapFree( GetProcessHeap(), 0, wsa );
     release_sock_fd( s, fd );
+    if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = bytes_recvd;
     _enable_event(SOCKET2HANDLE(s), FD_READ, 0, 0);
 
     return 0;
@@ -5810,6 +5813,7 @@ error:
     HeapFree( GetProcessHeap(), 0, wsa );
     release_sock_fd( s, fd );
     WARN(" -> ERROR %d\n", err);
+    if (lpNumberOfBytesRecvd) *lpNumberOfBytesRecvd = bytes_recvd;
     WSASetLastError( err );
     return SOCKET_ERROR;
 }
