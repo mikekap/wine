@@ -1832,77 +1832,6 @@ static NTSTATUS WS2_async_send(void* user, IO_STATUS_BLOCK* iosb, NTSTATUS statu
 }
 
 /***********************************************************************
- *              WS2_async_shutdown      (INTERNAL)
- *
- * Handler for shutdown() operations on overlapped sockets.
- */
-static NTSTATUS WS2_async_shutdown( void* user, PIO_STATUS_BLOCK iosb, NTSTATUS status, void **apc )
-{
-    ws2_async* wsa = user;
-    int fd, err = 1;
-
-    switch (status)
-    {
-    case STATUS_ALERTED:
-        if ((status = wine_server_handle_to_fd( wsa->hSocket, 0, &fd, NULL ) ))
-            break;
-
-        switch ( wsa->type )
-        {
-        case ASYNC_TYPE_READ:   err = shutdown( fd, 0 );  break;
-        case ASYNC_TYPE_WRITE:  err = shutdown( fd, 1 );  break;
-        }
-        status = err ? wsaErrStatus() : STATUS_SUCCESS;
-        wine_server_release_fd( wsa->hSocket, fd );
-        break;
-    }
-    iosb->u.Status = status;
-    iosb->Information = 0;
-    *apc = ws2_async_apc;
-    return status;
-}
-
-/***********************************************************************
- *  WS2_register_async_shutdown         (INTERNAL)
- *
- * Helper function for WS_shutdown() on overlapped sockets.
- */
-static int WS2_register_async_shutdown( SOCKET s, int type )
-{
-    struct ws2_async *wsa;
-    NTSTATUS status;
-
-    TRACE("s %ld type %d\n", s, type);
-
-    wsa = HeapAlloc( GetProcessHeap(), 0, sizeof(*wsa) );
-    if ( !wsa )
-        return WSAEFAULT;
-
-    wsa->hSocket         = SOCKET2HANDLE(s);
-    wsa->type            = type;
-    wsa->completion_func = NULL;
-
-    SERVER_START_REQ( register_async )
-    {
-        req->type   = type;
-        req->async.handle   = wine_server_obj_handle( wsa->hSocket );
-        req->async.callback = wine_server_client_ptr( WS2_async_shutdown );
-        req->async.iosb     = wine_server_client_ptr( &wsa->local_iosb );
-        req->async.arg      = wine_server_client_ptr( wsa );
-        req->async.cvalue   = 0;
-        status = wine_server_call( req );
-    }
-    SERVER_END_REQ;
-
-    if (status != STATUS_PENDING)
-    {
-        HeapFree( GetProcessHeap(), 0, wsa );
-        return NtStatusToWSAError( status );
-    }
-    return 0;
-}
-
-/***********************************************************************
  *		accept		(WS2_32.1)
  */
 SOCKET WINAPI WS_accept(SOCKET s, struct WS_sockaddr *addr,
@@ -4345,66 +4274,30 @@ int WINAPI WS_setsockopt(SOCKET s, int level, int optname,
  */
 int WINAPI WS_shutdown(SOCKET s, int how)
 {
-    int fd, err = WSAENOTSOCK;
-    unsigned int options, clear_flags = 0;
+    int status;
 
-    fd = get_sock_fd( s, 0, &options );
-    TRACE("socket %04lx, how %i %x\n", s, how, options );
+    TRACE("socket %04lx, how %i\n", s, how );
 
-    if (fd == -1)
+    if (how != SD_RECEIVE && how != SD_SEND && how != SD_BOTH)
+    {
+        SetLastError( WSAEINVAL );
         return SOCKET_ERROR;
-
-    switch( how )
-    {
-    case 0: /* drop receives */
-        clear_flags |= FD_READ;
-        break;
-    case 1: /* drop sends */
-        clear_flags |= FD_WRITE;
-        break;
-    case 2: /* drop all */
-        clear_flags |= FD_READ|FD_WRITE;
-    default:
-        clear_flags |= FD_WINE_LISTENING;
     }
 
-    if (!(options & (FILE_SYNCHRONOUS_IO_ALERT | FILE_SYNCHRONOUS_IO_NONALERT)))
+    /* all the shutdowns are done server side since the server is responsible for the
+     * state of the socket (and we can confuse it if we are out of sync) */
+    SERVER_START_REQ( register_async_shutdown )
     {
-        switch ( how )
-        {
-        case SD_RECEIVE:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_READ );
-            break;
-        case SD_SEND:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_WRITE );
-            break;
-        case SD_BOTH:
-        default:
-            err = WS2_register_async_shutdown( s, ASYNC_TYPE_READ );
-            if (!err) err = WS2_register_async_shutdown( s, ASYNC_TYPE_WRITE );
-            break;
-        }
-        if (err) goto error;
+        req->handle = wine_server_obj_handle( SOCKET2HANDLE(s) );
+        req->how    = how;
+        status = wine_server_call( req );
     }
-    else /* non-overlapped mode */
-    {
-        if ( shutdown( fd, how ) )
-        {
-            err = wsaErrno();
-            goto error;
-        }
-    }
+    SERVER_END_REQ;
 
-    release_sock_fd( s, fd );
-    _enable_event( SOCKET2HANDLE(s), 0, 0, clear_flags );
-    if ( how > 1) WSAAsyncSelect( s, 0, 0, 0 );
-    return 0;
-
-error:
-    release_sock_fd( s, fd );
-    _enable_event( SOCKET2HANDLE(s), 0, 0, clear_flags );
-    WSASetLastError( err );
-    return SOCKET_ERROR;
+    if (!status && how > 1) WSAAsyncSelect( s, 0, 0, 0 );
+    if (status)
+        WSASetLastError( NtStatusToWSAError(status) );
+    return status ? SOCKET_ERROR : 0;
 }
 
 /***********************************************************************
