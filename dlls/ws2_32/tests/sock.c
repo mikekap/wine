@@ -3754,10 +3754,18 @@ static void test_WSARecv(void)
     DWORD dwret;
     BOOL bret;
 
+    set_so_opentype(TRUE);
+
     tcp_socketpair(&src, &dest);
     if (src == INVALID_SOCKET || dest == INVALID_SOCKET)
     {
         skip("failed to create sockets\n");
+        goto end;
+    }
+
+    if (set_blocking(src, FALSE))
+    {
+        skip("couldn't make socket non-blocking, error %d\n", WSAGetLastError());
         goto end;
     }
 
@@ -3770,6 +3778,40 @@ static void test_WSARecv(void)
     ok(ov.hEvent != NULL, "could not create event object, errno = %d\n", GetLastError());
     if (!ov.hEvent)
         goto end;
+
+    iret = WSARecv(src, &bufs, 1, &bytesReturned, &flags, &ov, NULL);
+    ok(iret == SOCKET_ERROR && GetLastError() == ERROR_IO_PENDING, "WSARecv failed - %d error %d\n", iret, GetLastError());
+
+    iret = shutdown(src, SD_RECEIVE);
+    ok(iret == 0, "Could not shutdown source socket %d error %d\n", iret, GetLastError());
+
+    dwret = WaitForSingleObject(ov.hEvent, 100);
+    ok(dwret == WAIT_TIMEOUT, "Waiting for disconnect event failed with %d + errno %d\n", dwret, GetLastError());
+
+    iret = send(dest, "1", 1, 0);
+    ok(iret == 1, "Could not send data %d error %d\n", iret, GetLastError());
+
+    dwret = WaitForSingleObject(ov.hEvent, 1000);
+    ok(dwret == WAIT_OBJECT_0, "Waiting for disconnect event failed with %d + errno %d\n", dwret, GetLastError());
+
+    bret = GetOverlappedResult((HANDLE)dest, &ov, &bytesReturned, FALSE);
+    ok(bret, "Could not get overlapped result %d error %d\n", bret, GetLastError());
+    ok(bytesReturned == 1, "Wrong number of bytes returned %d\n", bytesReturned);
+
+    iret = WSARecv(src, &bufs, 1, &bytesReturned, &flags, NULL, NULL);
+    todo_wine ok(iret == SOCKET_ERROR && GetLastError() == WSAESHUTDOWN, "WSARecv started correctly? %d error %d\n", iret, GetLastError());
+
+    closesocket(src);
+    src = INVALID_SOCKET;
+    closesocket(dest);
+    dest = INVALID_SOCKET;
+
+    tcp_socketpair(&src, &dest);
+    if (src == INVALID_SOCKET || dest == INVALID_SOCKET)
+    {
+        skip("failed to create sockets\n");
+        goto end;
+    }
 
     ling.l_onoff = 1;
     ling.l_linger = 0;
